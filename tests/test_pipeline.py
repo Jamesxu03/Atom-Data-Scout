@@ -4,6 +4,8 @@ from tests.test_discovery import HYPS, _router
 from tests.test_hypotheses import SPEC
 from worker import pipeline, runs
 from worker.crawl import CrawlResult, Page
+from worker.discovery import Discovery
+from worker.discovery.domains import normalize_domain
 from worker.schemas import DataSpec, FoundList
 from worker.steps.contacts import FoundContact, FoundContacts
 from worker.steps.hypotheses import HypothesisList
@@ -56,6 +58,17 @@ def test_live_run_funnel(fake_ask, monkeypatch, tmp_path):
         ("made.up@otter.ai", False),  # search result not found on its source page
     ]
     assert f.with_contacts == 1
+    for step in ("Analyse brief", "Hypotheses", "Discovery searches", "Screen", "Source checks",
+                 "Snowball searches", "Screen new", "Deep crawl + contacts", "total"):
+        assert step in out.timings, step
+    # sources are only checked for companies the screen kept
+    d = runs.load(tmp_path / out.run_dir.split("/")[-1], "discovery", Discovery)
+    kept = {c.domain for c in out.candidates if c.relevance in ("yes", "maybe")}
+    for h in d.hits:
+        if normalize_domain(h.website) in kept:
+            assert h.source_checked, h
+        elif h.website and "g2.com" not in h.website:
+            assert not h.source_checked, h
     for name in ("spec", "hypotheses", "discovery", "output"):
         assert (tmp_path / out.run_dir.split("/")[-1] / f"{name}.json").exists()
 

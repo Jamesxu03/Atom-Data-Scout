@@ -19,6 +19,9 @@ from pydantic import BaseModel
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 USER_AGENT = "Mozilla/5.0 (compatible; AtomDataScout/0.1)"
 MIN_TEXT_CHARS = 200  # less than this = probably a JS shell, try playwright
+# 5s to connect, 10s per read: a site that slow is treated as unreachable ("maybe"), not waited on
+HTTP_TIMEOUT = httpx.Timeout(10, connect=5)
+RENDER_SETTLE_MS = 3000  # max wait for client-side rendering after DOMContentLoaded
 
 LINK_PATTERNS = {
     "privacy": re.compile(r"privacy|data[-_ ]?protection|gdpr", re.I),
@@ -59,7 +62,7 @@ def _write_cache(path: Path, html: str) -> None:
 
 
 def _fetch_httpx(url: str) -> str:
-    with httpx.Client(follow_redirects=True, timeout=20, headers={"User-Agent": USER_AGENT}) as c:
+    with httpx.Client(follow_redirects=True, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT}) as c:
         r = c.get(url)
         r.raise_for_status()
         return r.text
@@ -82,8 +85,11 @@ class Browser:
             self._browser = self._pw.chromium.launch()
         page = self._browser.new_page(user_agent=USER_AGENT)
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(3000)  # give client-side rendering a moment
+            page.goto(url, wait_until="domcontentloaded", timeout=20_000)
+            try:  # until the network goes quiet, but never more than RENDER_SETTLE_MS
+                page.wait_for_load_state("networkidle", timeout=RENDER_SETTLE_MS)
+            except Exception:  # still busy (analytics, chat widgets): take what has rendered
+                pass
             return page.content()
         finally:
             page.close()

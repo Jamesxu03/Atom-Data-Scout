@@ -4,25 +4,24 @@
 If the Gemini quota runs out mid-run, everything gathered so far is saved and returned with
 partial=True instead of being lost.
 
-Profile extraction and scoring aren't wired into live runs yet; demo mode shows the full output.
+Profile extraction and scoring aren't built yet, so `results` stays empty.
 """
 
 import csv
 import io
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
 from pydantic import BaseModel
 
 from worker import runs
 from worker.config import FIND_CONTACTS, MAX_PROFILED, PARALLEL_CRAWLS
 from worker.crawl import CrawlResult, crawl
-from worker.demo import demo_candidates, demo_results
-from worker.discovery import Discovery, discover, pick_seeds, snowball
+from worker.discovery import Discovery, check_sources, discover, pick_seeds, snowball
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
 from worker.schemas import Candidate, Funnel, Result
-from worker.scoring import compute_total
 from worker.steps.contacts import find_contacts
 from worker.steps.hypotheses import HypothesisList, hypotheses
 from worker.steps.parse_brief import parse_brief
@@ -35,59 +34,88 @@ class RunOutput(BaseModel):
     funnel: Funnel
     candidates: list[Candidate]  # every deduped candidate, with relevance labels
     crawls: list[CrawlResult] = []
-    results: list[Result] = []  # scored profiles (demo only for now)
+    results: list[Result] = []  # scored profiles (not built yet)
     run_dir: str | None = None
     partial: bool = False  # quota ran out: stages after that point are missing or incomplete
     errors: list[str] = []
+    timings: dict[str, float] = {}  # seconds per step, in run order, plus "total"
+
+
+class Timer:
+    """Times each step and reports it through progress, so slow steps are visible."""
+
+    def __init__(self, progress: Progress):
+        self.progress = progress
+        self.timings: dict[str, float] = {}
+        self.started = time.perf_counter()
+
+    @contextmanager
+    def step(self, name: str, message: str | None = None) -> Iterator[None]:
+        self.progress(message or name)
+        t = time.perf_counter()
+        try:
+            yield
+        finally:
+            secs = round(time.perf_counter() - t, 1)
+            self.timings[name] = round(self.timings.get(name, 0) + secs, 1)
+            self.progress(f"✓ {name}: {secs:.1f}s")
+
+    def total(self) -> dict[str, float]:
+        return {**self.timings, "total": round(time.perf_counter() - self.started, 1)}
 
 
 def run(
     brief: str,
-    demo: bool = False,
     progress: Progress = print,
     seeds: list[tuple[str, str]] = (),
     crawler: Callable[[str], CrawlResult] = crawl,
 ) -> RunOutput:
-    if demo:
-        return _demo_run(progress)
-
     run_dir = runs.new_run()
     (run_dir / "brief.txt").write_text(brief, encoding="utf-8")
+    timer = Timer(progress)
 
-    progress("Analysing brief")
-    spec = parse_brief(brief)
+    with timer.step("Analyse brief"):
+        spec = parse_brief(brief)
     runs.save(run_dir, "spec", spec)
 
-    progress("Guessing who holds this data")
-    hyps = HypothesisList(hypotheses=hypotheses(spec))
+    with timer.step("Hypotheses", "Guessing who holds this data"):
+        hyps = HypothesisList(hypotheses=hypotheses(spec))
     runs.save(run_dir, "hypotheses", hyps)
 
     d = Discovery(hits=[], candidates=[])
     crawls: list[CrawlResult] = []
     errors: list[str] = []
     partial = False
+
+    def screen_and_check(label: str) -> None:
+        """Screen unlabelled candidates, then confirm sources for the ones kept."""
+        nonlocal d
+        with timer.step(label, f"{label}: {sum(c.relevance is None for c in d.candidates)} homepages"):
+            screen(spec, d.candidates, progress=progress)
+        runs.save(run_dir, "discovery", d)
+        with timer.step("Source checks"):
+            d = check_sources(d, {c.domain for c in relevant(d.candidates)}, progress=progress)
+        runs.save(run_dir, "discovery", d)
+
     try:
-        progress("Discovering candidate companies")
-        d = discover(spec, hyps.hypotheses, progress=progress)
+        with timer.step("Discovery searches", "Discovering candidate companies"):
+            d = discover(spec, hyps.hypotheses, progress=progress)
         runs.save(run_dir, "discovery", d)
         if d.partial:
             raise QuotaExceeded("quota ran out during discovery")
-
-        progress(f"Screening {len(d.candidates)} homepages for relevance")
-        screen(spec, d.candidates, progress=progress)
-        runs.save(run_dir, "discovery", d)
+        screen_and_check("Screen")
 
         seed_list = pick_seeds(d.candidates, explicit=list(seeds))
         if seed_list:
-            progress(f"Snowballing from {len(seed_list)} relevant companies")
-            d = snowball(d, seed_list, progress=progress)
+            with timer.step("Snowball searches", f"Snowballing from {len(seed_list)} relevant companies"):
+                d = snowball(d, seed_list, progress=progress)
             runs.save(run_dir, "discovery", d)
-            screen(spec, d.candidates, progress=progress)  # only the new ones
-            runs.save(run_dir, "discovery", d)
+            screen_and_check("Screen new")  # only the snowball companies
             if d.partial:
                 raise QuotaExceeded("quota ran out during snowballing")
 
-        crawls = _profile(relevant(d.candidates)[:MAX_PROFILED], crawler, progress, errors)
+        with timer.step("Deep crawl + contacts"):
+            crawls = _profile(relevant(d.candidates)[:MAX_PROFILED], crawler, progress, errors)
     except QuotaExceeded as e:
         partial = True
         errors.append(f"Stopped early — Gemini quota: {str(e)[:300]}")
@@ -105,9 +133,10 @@ def run(
     )
     out = RunOutput(
         funnel=funnel, candidates=d.candidates, crawls=crawls, run_dir=str(run_dir),
-        partial=partial, errors=d.errors + errors,
+        partial=partial, errors=d.errors + errors, timings=timer.total(),
     )
     runs.save(run_dir, "output", out)
+    progress(f"Done in {out.timings['total']:.0f}s")
     return out
 
 
@@ -138,27 +167,6 @@ def _profile(
     if batch.quota_error:
         raise QuotaExceeded(batch.quota_error)
     return [cr for _, cr in batch.results]
-
-
-def _demo_run(progress: Progress) -> RunOutput:
-    for step in ["Analysing brief", "Guessing who holds this data",
-                 "Discovering candidate companies", "Screening homepages",
-                 "Snowballing from relevant companies", "Deep crawl", "Finding contacts"]:
-        progress(step)
-        time.sleep(0.2)
-    results = demo_results()
-    for r in results:
-        r.score.total = compute_total(r.score)
-    results.sort(key=lambda r: r.score.total, reverse=True)
-    candidates = demo_candidates()
-    keep = relevant(candidates)
-    return RunOutput(
-        funnel=Funnel(found=len(candidates) + 4, deduped=len(candidates),
-                      relevant=len(keep), profiled=len(results),
-                      with_contacts=sum(1 for c in candidates if any(k.verified for k in c.contacts))),
-        candidates=candidates,
-        results=results,
-    )
 
 
 def to_csv(results: list[Result]) -> str:
@@ -204,7 +212,9 @@ def candidates_csv(candidates: list[Candidate]) -> str:
 if __name__ == "__main__":
     import sys
 
-    out = run(" ".join(sys.argv[1:]) or "demo", demo=len(sys.argv) < 2)
+    if len(sys.argv) < 2:
+        sys.exit('Usage: python -m worker.pipeline "<brief>"')
+    out = run(" ".join(sys.argv[1:]))
     print(out.funnel)
     for c in relevant(out.candidates):
         print(f"  {c.relevance:5} {c.domain:30} {','.join(c.channels)}")

@@ -29,7 +29,7 @@ def resolve_source(url: str) -> str:
     if GROUNDING_REDIRECT not in url:
         return url
     try:
-        r = httpx.head(url, follow_redirects=False, timeout=10)
+        r = httpx.head(url, follow_redirects=False, timeout=5)
         return r.headers.get("location") or url
     except httpx.HTTPError:
         return url

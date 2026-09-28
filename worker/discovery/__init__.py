@@ -1,8 +1,9 @@
 """Discovery: search channels in parallel, check sources, merge and dedupe by domain.
 
 Two phases, so snowballing only starts from companies the relevance screen confirmed:
-  discover()  — (a) product search, (c) directories, (d) marketplaces
-  snowball()  — (b) "alternatives to X" from explicit seeds + screened "yes" companies
+  discover()       — (a) product search, (c) directories, (d) marketplaces
+  snowball()       — (b) "alternatives to X" from explicit seeds + screened "yes" companies
+  check_sources()  — confirm source pages, only for companies worth keeping (after screening)
 
 Run: uv run python -m worker.discovery [run_dir]   (needs spec.json + hypotheses.json; phase 1 only)
 """
@@ -28,6 +29,7 @@ class Hit(BaseModel):
     website: str
     source_url: str
     source_verified: bool = False  # source page confirmed to list this company
+    source_checked: bool = False  # check_sources has looked at this hit
     hypothesis: str | None = None
     seed: str | None = None
 
@@ -66,16 +68,25 @@ def merge(hits: list[Hit], previous: list[Candidate] = ()) -> list[Candidate]:
     return list(by_domain.values())
 
 
-def _check_sources(hits: list[Hit]) -> None:
-    """Resolve redirects and confirm each source page lists the company (in place, parallel)."""
-    batch = run_parallel(
-        [(str(i), lambda h=h: channels.verify_source(Found(**h.model_dump(include={"name", "website", "source_url"}))))
-         for i, h in enumerate(hits)],
-        workers=PARALLEL_FETCHES,
-        progress=lambda _: None,
-    )
-    for label, (url, ok) in batch.results:
-        hits[int(label)].source_url, hits[int(label)].source_verified = url, ok
+def check_sources(d: Discovery, domains: set[str], progress: Progress = print) -> Discovery:
+    """Resolve redirects and confirm source pages list the company, for hits on `domains`.
+
+    Each hit is checked once; call again after snowballing and only the new hits are fetched.
+    """
+    todo = [h for h in d.hits if not h.source_checked and normalize_domain(h.website) in domains]
+    if todo:
+        progress(f"Checking {len(todo)} source pages")
+        batch = run_parallel(
+            [(str(i), lambda h=h: channels.verify_source(Found(**h.model_dump(include={"name", "website", "source_url"}))))
+             for i, h in enumerate(todo)],
+            workers=PARALLEL_FETCHES,
+            progress=lambda _: None,
+        )
+        for label, (url, ok) in batch.results:
+            todo[int(label)].source_url, todo[int(label)].source_verified = url, ok
+        for h in todo:
+            h.source_checked = True
+    return d.model_copy(update={"candidates": merge(d.hits, previous=d.candidates)})
 
 
 def _run_channels(tasks, progress: Progress) -> tuple[list[Hit], list[str], bool]:
@@ -83,8 +94,6 @@ def _run_channels(tasks, progress: Progress) -> tuple[list[Hit], list[str], bool
     tags = {label: t for label, _, t in tasks}
     batch = run_parallel([(label, fn) for label, fn, _ in tasks], PARALLEL_LLM_CALLS, progress)
     hits = [Hit(**tags[label], **f.model_dump()) for label, found in batch.results for f in found]
-    progress(f"Checking {len(hits)} source pages")
-    _check_sources(hits)
     errors = batch.errors + ([f"stopped early, quota: {batch.quota_error}"] if batch.quota_error else [])
     return hits, errors, batch.quota_error is not None
 
@@ -143,6 +152,7 @@ if __name__ == "__main__":
     spec = runs.load(run_dir, "spec", DataSpec)
     hyps = runs.load(run_dir, "hypotheses", HypothesisList).hypotheses
     d = discover(spec, hyps)
+    d = check_sources(d, {c.domain for c in d.candidates})
     print(f"\n{len(d.hits)} hits -> {len(d.candidates)} unique domains")
     for c in d.candidates:
         print(f"  {c.domain:30} {'✓' if c.source_verified else '?'} {','.join(c.channels)}")

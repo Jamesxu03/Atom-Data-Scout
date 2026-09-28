@@ -40,11 +40,11 @@ def start_job() -> None:
     if (job := st.session_state.get("job")) and not job.done:
         return  # already running
     job = Job()
-    brief, demo = st.session_state.brief, st.session_state.demo
+    brief = st.session_state.brief
 
     def work():
         try:
-            job.output = pipeline.run(brief, demo=demo, progress=job.messages.append)
+            job.output = pipeline.run(brief, progress=job.messages.append)
         except Exception as e:
             job.error = f"{type(e).__name__}: {e}"
         finally:
@@ -57,8 +57,7 @@ def start_job() -> None:
 
 st.set_page_config(page_title="Atom Data Scout", page_icon=LOGO, layout="wide")
 st.logo(LOGO, size="large")
-st.image(LOGO, width=180)
-st.title("Data Scout")
+st.title("Atom Data Scout")
 
 job: Job | None = st.session_state.get("job")
 running = job is not None and not job.done
@@ -67,7 +66,6 @@ left, right = st.columns([1, 2])
 
 with left:
     st.text_area("Data brief", EXAMPLE_BRIEF, height=180, key="brief")
-    st.toggle("Demo mode (fake data, no API calls)", value=True, key="demo")
     st.button(
         "Running…" if running else "Start search",
         type="primary",
@@ -92,6 +90,11 @@ with left:
             st.error(f"Failed after {job.elapsed}s — {job.error}")
         else:
             with st.status(f"Done in {job.elapsed}s", state="complete", expanded=False):
+                if job.output and job.output.timings:
+                    st.dataframe(
+                        pd.DataFrame(job.output.timings.items(), columns=["Step", "Seconds"]),
+                        hide_index=True,
+                    )
                 for m in job.messages:
                     st.write(m)
 
@@ -195,7 +198,7 @@ with right:
 
         results = output.results
         if not results:
-            st.caption("Profile extraction and scoring aren't wired into live runs yet.")
+            st.caption("Profile extraction and scoring aren't built yet.")
             st.stop()
 
         st.subheader("Ranked profiles")

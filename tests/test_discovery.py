@@ -2,7 +2,7 @@ import httpx
 
 from tests.test_hypotheses import SPEC
 from worker.config import DISCOVERY
-from worker.discovery import Hit, channels, discover, merge, pick_seeds, snowball
+from worker.discovery import Discovery, Hit, channels, discover, merge, pick_seeds, snowball
 from worker.discovery.domains import normalize_domain
 from worker.llm import QuotaExceeded
 from worker.schemas import Candidate, Found, FoundList, HolderHypothesis
@@ -175,3 +175,27 @@ def test_unresolvable_redirect_is_kept_but_unverified(monkeypatch):
     monkeypatch.setattr(httpx, "head", boom)
     redirect = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQ"
     assert channels.verify_source(Found(name="X", website="https://x.com", source_url=redirect)) == (redirect, False)
+
+
+def test_check_sources_only_for_given_domains_and_only_once(monkeypatch):
+    from worker.discovery import check_sources
+
+    checked = []
+
+    def fake_verify(found):
+        checked.append(found.website)
+        return found.source_url + "#real", True
+
+    monkeypatch.setattr(channels, "verify_source", fake_verify)
+    hits = [
+        Hit(channel="product_search", name="Keep", website="https://keep.com", source_url="s1"),
+        Hit(channel="product_search", name="Drop", website="https://drop.com", source_url="s2"),
+    ]
+    d = Discovery(hits=hits, candidates=merge(hits))
+    d = check_sources(d, {"keep.com"}, **QUIET)
+    d = check_sources(d, {"keep.com"}, **QUIET)  # second call: nothing new to fetch
+
+    assert checked == ["https://keep.com"]
+    by = {c.domain: c for c in d.candidates}
+    assert by["keep.com"].source_verified and by["keep.com"].source_urls == ["s1#real"]
+    assert not by["drop.com"].source_verified and by["drop.com"].source_urls == ["s2"]

@@ -9,7 +9,7 @@ brief → data spec → holder hypotheses → discovery (4 channels) → relevan
 ```
 
 Every Gemini call uses `gemini-3.8-flash` (see `worker/config.py`). Independent calls and
-page fetches run in parallel.
+page fetches run in parallel, and each step's time is shown and saved in `output.json`.
 
 ## Layout
 
@@ -23,7 +23,6 @@ worker/
   steps/                parse_brief, hypotheses, screen, contacts
   crawl.py              homepage / privacy / terms / contact pages (httpx, playwright fallback)
   parallel.py           thread pool that keeps finished results if the quota runs out
-  demo.py               fictional data for demo mode
 eval/
   seed_companies.csv    companies you know are relevant (fill this in)
   discovery_recall.py   what share of them discovery found, and via which channel
@@ -31,7 +30,7 @@ tests/                  pytest; Gemini is faked and network is blocked
 data/                   run outputs and page cache (gitignored)
 ```
 
-Not built yet: profile extraction and scoring in live runs (demo only), and company
+Not built yet: profile extraction and scoring, and company
 registry lookups (the profile has country-neutral registry fields for when one is added).
 
 **Phase 1:** Python + Streamlit, to validate result quality.
@@ -50,7 +49,7 @@ cp .env.example .env                  # then add your GEMINI_API_KEY
 ## Use
 
 ```bash
-uv run streamlit run app.py           # the UI; switch off Demo mode for a real run
+uv run streamlit run app.py           # the UI (every search makes real Gemini calls)
 uv run python test_gemini.py          # check the API key works (1 call)
 uv run pytest                         # tests, no API calls
 RUN_LIVE=1 uv run pytest              # also run the live Gemini test
