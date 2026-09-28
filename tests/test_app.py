@@ -15,13 +15,18 @@ def _fake_run(brief, progress=print, **_):
         Candidate(name="Otter", website="https://otter.ai", domain="otter.ai",
                   channels=["product_search", "directory"], source_urls=["https://g2.com/x"],
                   source_verified=True, relevance="yes", relevance_reason="AI notetaker",
+                  holder_type="by_product", data_owner="customers",
                   contacts=[Contact(email="privacy@otter.ai", role="Privacy / DPO inbox",
                                     source_url="https://otter.ai/privacy", origin="website", verified=True)]),
         Candidate(name="Payroll Co", website="https://payroll.example", domain="payroll.example",
-                  channels=["product_search"], source_urls=[], relevance="no", relevance_reason="HR"),
+                  channels=["product_search"], source_urls=[], relevance="no", relevance_reason="HR",
+                  holder_type="unrelated", data_owner="unclear"),
+        Candidate(name="EgoData", website="https://egodata.example", domain="egodata.example",
+                  channels=["marketplace"], source_urls=[], relevance="yes", relevance_reason="sells data",
+                  holder_type="vendor", data_owner="company"),
     ]
     return pipeline.RunOutput(
-        funnel=Funnel(found=3, deduped=2, relevant=1, profiled=1, with_contacts=1),
+        funnel=Funnel(found=4, deduped=3, relevant=2, profiled=1, with_contacts=1),
         candidates=cands, timings={"Analyse brief": 0.2, "total": 0.2},
     )
 
@@ -44,8 +49,12 @@ def test_run_from_page(monkeypatch):
 
     assert not at.exception
     assert [(m.label, m.value) for m in at.metric] == [
-        ("Found", "3"), ("After dedupe", "2"), ("Relevant", "1"), ("Profiled", "1"), ("With contacts", "1"),
+        ("Found", "4"), ("After dedupe", "3"), ("Relevant", "2"), ("Profiled", "1"), ("With contacts", "1"),
     ]
-    assert len(at.dataframe[1].value) == 1  # candidates table hides "no" by default
+    # one table per holder type; "no" (the unrelated payroll company) hidden by default
+    groups = [m.value for m in at.markdown if m.value.startswith("**")]
+    assert groups == ["**Data vendors** (1)", "**By-product holders** (1)"]
+    assert list(at.dataframe[1].value["Company"]) == ["EgoData"]
+    assert list(at.dataframe[2].value["Company"]) == ["Otter"]
     assert [h.value for h in at.subheader] == ["Candidates", "Contacts"]
     assert at.button[0].label == "Start search"

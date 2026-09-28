@@ -17,10 +17,14 @@ PARALLEL_CRAWLS = 3  # deep crawls may each start a headless browser
 DISCOVERY = {
     "product_search_hypotheses": 5,  # (a) one call per hypothesis
     "snowball_seeds": 3,  # (b) one call per seed company
-    "directory_hypotheses": 3,  # (c) one call per hypothesis
-    "marketplace_calls": 1,  # (d)
+    "directory_hypotheses": 1,  # (c) one call per hypothesis; broad categories mostly add noise
+    "marketplace_calls": 3,  # (d) one call per angle in channels.MARKETPLACE_ANGLES (max 3)
     "companies_per_call": 10,
 }
+
+# Snowball only from screened "yes" companies of these holder types. Technology providers
+# drift into "alternatives to <hardware>" pages full of unrelated device makers.
+SNOWBALL_SEED_TYPES = ["by_product"]
 
 # Relevance screen: homepages per Flash call
 SCREEN_BATCH_SIZE = 10

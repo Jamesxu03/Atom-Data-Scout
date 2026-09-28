@@ -18,7 +18,9 @@ def _label_by_prefix(prompt):
             if domain.startswith("silent"):
                 continue
             label = domain.split("-")[0] if domain.split("-")[0] in ("yes", "maybe") else "no"
-            items.append(ScreenItem(domain=domain.upper(), label=label, reason=f"because {domain}"))
+            holder = "technology" if "tech" in domain else "unrelated" if label == "no" else "by_product"
+            items.append(ScreenItem(domain=domain.upper(), holder_type=holder, data_owner="unclear",
+                                    label=label, reason=f"because {domain}"))
     return ScreenBatch(results=items)
 
 
@@ -36,8 +38,10 @@ def test_screen_labels_and_filters(fake_ask):
 
     assert by["yes-a.com"].relevance == "yes"
     assert by["yes-a.com"].relevance_reason == "because yes-a.com"
+    assert (by["yes-a.com"].holder_type, by["yes-a.com"].data_owner) == ("by_product", "unclear")
     assert by["no-c.com"].relevance == "no"
     assert by["down.com"].relevance == "maybe"  # unreachable is kept, not judged
+    assert by["down.com"].holder_type is None
     assert "unreachable" in by["down.com"].relevance_reason
     assert by["silent-d.com"].relevance == "maybe"  # model skipped it
     assert [c.domain for c in relevant(cands)][0] == "yes-a.com"
@@ -119,3 +123,25 @@ def test_relevant_ranks_by_corroboration_not_arrival_order():
     for c, label in ((lone, "yes"), (strong, "yes"), (maybe, "maybe")):
         c.relevance = label
     assert [c.domain for c in relevant([lone, maybe, strong])] == ["strong.com", "lone.com", "maybe.com"]
+
+
+def test_technology_company_is_never_yes(fake_ask):
+    fake_ask.responses[ScreenBatch] = _label_by_prefix
+    tech = _cand("yes-tech.com")  # model says yes, but it sells tracking software, not footage
+    screen(SPEC, [tech], fetch=lambda _: "text", progress=lambda _: None)
+    assert (tech.relevance, tech.holder_type) == ("maybe", "technology")
+
+
+def test_rank_by_holder_type_before_corroboration():
+    def screened(domain, relevance, holder, channels=("product_search",)):
+        c = _cand(domain)
+        c.relevance, c.holder_type, c.channels = relevance, holder, list(channels)
+        return c
+
+    famous = screened("famous.com", "yes", "by_product", ["product_search", "directory", "snowball"])
+    vendor = screened("vendor.com", "yes", "vendor", ["marketplace"])
+    niche = screened("niche.com", "yes", "by_product")
+    tech = screened("tech.com", "maybe", "technology", ["product_search", "directory"])
+    maybe_vendor = screened("maybe-vendor.com", "maybe", "vendor")
+    order = [c.domain for c in relevant([tech, niche, famous, maybe_vendor, vendor])]
+    assert order == ["vendor.com", "famous.com", "niche.com", "maybe-vendor.com", "tech.com"]

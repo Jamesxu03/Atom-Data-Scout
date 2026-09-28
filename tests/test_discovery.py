@@ -58,7 +58,7 @@ def _router(prompt: str) -> FoundList:
             Found(name="Otter", website="https://otter.ai", source_url="https://www.g2.com/categories/x"),
             Found(name="G2", website="https://g2.com", source_url="https://www.g2.com/categories/x"),
         ])
-    if "Datarade" in prompt:
+    if "already produce or sell data" in prompt:
         return FoundList(companies=[Found(name="DataCo", website="https://dataco.io", source_url="https://datarade.ai/x")])
     query = prompt.split("- query ")[1].split("\n")[0]
     return FoundList(companies=[
@@ -71,10 +71,13 @@ def test_discover_runs_phase_one_channels_within_budget(fake_ask):
     fake_ask.responses[FoundList] = _router
     d = discover(SPEC, HYPS, **QUIET)
 
-    expected = DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"] + DISCOVERY["marketplace_calls"]
+    angles = min(DISCOVERY["marketplace_calls"], len(channels.MARKETPLACE_ANGLES))
+    expected = DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"] + angles
     assert len(fake_ask.calls) == expected
     assert all(c.use_search for c in fake_ask.calls)
     assert not any("compete with" in c.prompt for c in fake_ask.calls)  # no snowball yet
+    vendor_prompts = [c.prompt for c in fake_ask.calls if "already produce or sell data" in c.prompt]
+    assert len(set(vendor_prompts)) == angles  # each call searches from a different angle
 
     by_domain = {c.domain: c for c in d.candidates}
     assert set(by_domain["otter.ai"].channels) == {"product_search", "directory"}
@@ -84,17 +87,20 @@ def test_discover_runs_phase_one_channels_within_budget(fake_ask):
     assert not d.partial
 
 
-def test_pick_seeds_uses_explicit_then_screened_yes():
-    def cand(domain, relevance, channels):
+def test_pick_seeds_uses_explicit_then_screened_yes_by_product_holders():
+    def cand(domain, relevance, channels, holder="by_product"):
         return Candidate(name=domain, website=f"https://{domain}", domain=domain, channels=channels,
-                         source_urls=[], relevance=relevance)
+                         source_urls=[], relevance=relevance, holder_type=holder)
 
     cands = [
         cand("maybe.com", "maybe", ["product_search", "directory"]),
         cand("one.com", "yes", ["product_search"]),
         cand("two.com", "yes", ["product_search", "directory"]),
-        cand("unscreened.com", None, ["product_search", "directory", "marketplace"]),
+        cand("unscreened.com", None, ["product_search", "directory", "marketplace"], holder=None),
         cand("fireflies.ai", "yes", ["directory"]),
+        # well corroborated, but alternatives to a tracking-hardware maker drift off topic
+        cand("tracker.com", "yes", ["product_search", "directory", "snowball"], holder="technology"),
+        cand("vendor.com", "yes", ["product_search", "directory", "marketplace"], holder="vendor"),
     ]
     seeds = pick_seeds(cands, explicit=[("Fireflies", "https://fireflies.ai")])
     assert [w for _, w in seeds] == ["https://fireflies.ai", "https://two.com", "https://one.com"][: DISCOVERY["snowball_seeds"]]
@@ -123,7 +129,7 @@ def test_failed_channel_call_is_recorded_not_fatal(fake_ask):
     fake_ask.responses[FoundList] = flaky
     d = discover(SPEC, HYPS, **QUIET)
     assert d.candidates
-    assert len(d.errors) == 1 and "marketplaces" in d.errors[0]
+    assert len(d.errors) == 1 and "marketplace listings" in d.errors[0]
     assert not d.partial
 
 

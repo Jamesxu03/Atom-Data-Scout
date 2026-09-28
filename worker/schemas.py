@@ -34,6 +34,10 @@ class HolderHypothesis(BaseModel):
 
 Channel = Literal["product_search", "snowball", "directory", "marketplace"]
 Relevance = Literal["yes", "maybe", "no"]
+# vendor: collects or sells this data as its business; by_product: its product captures it in
+# normal operation; technology: makes tools or hardware for it but doesn't keep it at scale
+HolderType = Literal["vendor", "by_product", "technology", "unrelated"]
+DataOwner = Literal["company", "customers", "unclear"]
 
 
 class Found(BaseModel):
@@ -78,11 +82,13 @@ class Candidate(BaseModel):
     # Filled by the relevance screen
     relevance: Relevance | None = None
     relevance_reason: str | None = None
+    holder_type: HolderType | None = None
+    data_owner: DataOwner | None = None
     # Filled by the contacts step (profiled companies only)
     contacts: list[Contact] = []
 
     def corroboration(self) -> tuple[int, int, bool, int]:
-        """How well-supported this candidate is; higher sorts first among equal relevance."""
+        """How well-supported this candidate is; only a tiebreaker within relevance and holder type."""
         return (len(self.channels), len(self.hypotheses), self.source_verified, len(self.source_urls))
 
 

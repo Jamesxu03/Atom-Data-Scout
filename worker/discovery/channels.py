@@ -111,21 +111,43 @@ Search G2 (g2.com/categories/...), Capterra, GetApp and Product Hunt for the cat
 best matches, e.g. "site:g2.com {h.category}", "site:capterra.com {h.category}",
 "site:producthunt.com {h.category}".
 
+Only use a category that is specific to this type of product. If the closest categories
+are broad (e.g. "augmented reality software", "restaurant management", "warehouse
+software"), return only vendors whose listing clearly describes this type of product, or
+none at all.
+
 Return the vendors listed in those categories. source_url must be the directory page
 where each vendor is listed.""")
 
 
-def marketplace(spec: DataSpec) -> list[Found]:
-    """(d) Data marketplaces where similar data is already listed."""
-    return _search(f"""Find data providers already offering data similar to this on data
-marketplaces:
+# (d) One call per angle, each searching a different place data vendors show up. Dataset
+# language is right here, unlike in product search.
+MARKETPLACE_ANGLES = {
+    "marketplace listings": """Search data marketplaces such as Datarade, AWS Data Exchange,
+Snowflake Marketplace and Defined.ai for listings of this kind of data, e.g.
+"{data_type} dataset". Return the company that provides each listing, not the marketplace.
+source_url must be the listing page.""",
+    "collection services": """Search for data collection and annotation companies that
+record this kind of data to order or already hold it, e.g. "{data_type} data collection
+service", "{data_type} training data provider", "hours of {data_type} for AI training".
+source_url must be the company's page describing this service or data.""",
+    "published datasets": """Search Hugging Face, Kaggle, GitHub, arXiv and news or press
+releases for datasets of this kind that companies have released or announced, e.g.
+"{data_type} dataset hugging face", "startup releases {data_type} dataset". Return the
+company that recorded the data, not the hosting site. source_url must be the dataset page,
+paper or article.""",
+}
+
+
+def marketplace(spec: DataSpec, angle: str) -> list[Found]:
+    """(d) Companies that already produce or sell this kind of data, searched from one angle."""
+    return _search(f"""Find companies that already produce or sell data similar to this:
 - data type: {spec.data_type}
+- scenarios: {", ".join(spec.scenarios) or "any"}
 - languages: {", ".join(spec.languages) or "any"}
 - labels: {", ".join(spec.label_types) or "none"}
 
-Search marketplaces and dataset catalogues such as Datarade, AWS Data Exchange, Snowflake
-Marketplace, Defined.ai and Hugging Face for listings of this kind of data (here dataset
-language is right, e.g. "{spec.data_type} dataset").
+{MARKETPLACE_ANGLES[angle].format(data_type=spec.data_type)}
 
-Return the company that provides each listing, not the marketplace. source_url must be the
-listing page.""")
+Also search with the terms data vendors and researchers use for this kind of data, which
+may differ from the wording above (e.g. "egocentric" for first-person video).""")

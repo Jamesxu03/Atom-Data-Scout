@@ -15,7 +15,9 @@ from worker.steps.screen import ScreenBatch, ScreenItem
 def _otter_yes_rest_no(prompt: str) -> ScreenBatch:
     domains = [line[4:].split(" ")[0] for line in prompt.splitlines() if line.startswith("### ")]
     return ScreenBatch(results=[
-        ScreenItem(domain=d, label="yes" if d == "otter.ai" else "no", reason="r") for d in domains
+        ScreenItem(domain=d, holder_type="by_product" if d == "otter.ai" else "unrelated",
+                   data_owner="customers", label="yes" if d == "otter.ai" else "no", reason="r")
+        for d in domains
     ])
 
 

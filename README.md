@@ -4,7 +4,7 @@ Internal tool: given a buyer's data brief, find companies likely to hold that da
 by-product of their business, check they're relevant, and find people to contact.
 
 ```
-brief → data spec → holder hypotheses → discovery (4 channels) → relevance screen
+brief → data spec → holder hypotheses → discovery (4 channels) → relevance + holder-type screen
       → snowball from relevant companies → screen → deep crawl + contacts
 ```
 
@@ -19,7 +19,7 @@ worker/
   config.py             model, thinking level, concurrency, budgets, score weights
   llm.py                ask(): structured output, retries, optional Google Search
   pipeline.py           runs every step; saves each stage under data/runs/<time>/
-  discovery/            product search, snowball, directories, marketplaces; dedupe by domain
+  discovery/            product search, snowball, directories, data vendors; dedupe by domain
   steps/                parse_brief, hypotheses, screen, contacts
   crawl.py              homepage / privacy / terms / contact pages (httpx, playwright fallback)
   parallel.py           thread pool that keeps finished results if the quota runs out

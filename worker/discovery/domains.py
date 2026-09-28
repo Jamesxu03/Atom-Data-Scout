@@ -9,6 +9,7 @@ AGGREGATOR_DOMAINS = {
     "sourceforge.net", "crunchbase.com", "linkedin.com", "twitter.com", "x.com",
     "facebook.com", "youtube.com", "medium.com", "reddit.com", "wikipedia.org",
     "github.com", "techcrunch.com", "forbes.com",
+    "pitchbook.com", "craft.co", "growjo.com",
     "datarade.ai", "aws.amazon.com", "snowflake.com", "huggingface.co", "kaggle.com",
     "vertexaisearch.cloud.google.com",
 }

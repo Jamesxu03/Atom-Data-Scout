@@ -21,6 +21,14 @@ EXAMPLE_BRIEF = (
 
 LOGO = "assets/atom_logo.png"
 
+# Candidate tables, in the order they're shown (pipeline ranks vendors first too)
+HOLDER_GROUPS = [
+    ("Data vendors", {"vendor"}),
+    ("By-product holders", {"by_product"}),
+    ("Technology and hardware", {"technology"}),
+    ("Other", {"unrelated", None}),  # None: homepage unreachable, never screened by the model
+]
+
 
 @dataclass
 class Job:
@@ -103,6 +111,9 @@ with left:
 output = job.output if job and job.done else st.session_state.get("last_output")
 if job and job.done and job.output:
     st.session_state.last_output = job.output
+if output is not None and not isinstance(output, pipeline.RunOutput):
+    # made before a code change reloaded worker/: rebuild it so new fields get their defaults
+    output = pipeline.RunOutput.model_validate(output.model_dump())
 
 with right:
     if not output:
@@ -125,33 +136,42 @@ with right:
         st.subheader("Candidates")
         labels = st.multiselect("Relevance", ["yes", "maybe", "no"], default=["yes", "maybe"])
         shown = [c for c in output.candidates if c.relevance in labels]
-        st.dataframe(
-            pd.DataFrame(
-                [
-                    {
-                        "Company": c.name,
-                        "Relevance": c.relevance,
-                        "Reason": c.relevance_reason,
-                        "Channels": ", ".join(c.channels),
-                        "Website": c.website,
-                        "Found on": c.source_urls[0] if c.source_urls else None,
-                        "Source checked": c.source_verified,
-                    }
-                    for c in shown
-                ],
-                columns=["Company", "Relevance", "Reason", "Channels", "Website", "Found on",
-                         "Source checked"],
-            ),
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "Website": st.column_config.LinkColumn(),
-                "Found on": st.column_config.LinkColumn(),
-                "Source checked": st.column_config.CheckboxColumn(
-                    help="The source page was confirmed to list this company"
+        if not shown:
+            st.caption("No candidates with this relevance.")
+        for title, types in HOLDER_GROUPS:
+            group = [c for c in shown if c.holder_type in types]
+            if not group:
+                continue
+            st.markdown(f"**{title}** ({len(group)})")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Company": c.name,
+                            "Relevance": c.relevance,
+                            "Data owner": c.data_owner,
+                            "Reason": c.relevance_reason,
+                            "Channels": ", ".join(c.channels),
+                            "Website": c.website,
+                            "Found on": c.source_urls[0] if c.source_urls else None,
+                            "Source checked": c.source_verified,
+                        }
+                        for c in group
+                    ],
                 ),
-            },
-        )
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Data owner": st.column_config.TextColumn(
+                        help="company: its own recordings; customers: needs their permission"
+                    ),
+                    "Website": st.column_config.LinkColumn(),
+                    "Found on": st.column_config.LinkColumn(),
+                    "Source checked": st.column_config.CheckboxColumn(
+                        help="The source page was confirmed to list this company"
+                    ),
+                },
+            )
         st.download_button(
             "Download candidates CSV",
             pipeline.candidates_csv(output.candidates),

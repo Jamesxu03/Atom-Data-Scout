@@ -1,8 +1,9 @@
 """Discovery: search channels in parallel, check sources, merge and dedupe by domain.
 
 Two phases, so snowballing only starts from companies the relevance screen confirmed:
-  discover()       — (a) product search, (c) directories, (d) marketplaces
-  snowball()       — (b) "alternatives to X" from explicit seeds + screened "yes" companies
+  discover()       — (a) product search, (c) directories, (d) data vendors (marketplaces,
+                     collection services, published datasets)
+  snowball()       — (b) "alternatives to X" from explicit seeds + screened "yes" by-product holders
   check_sources()  — confirm source pages, only for companies worth keeping (after screening)
 
 Run: uv run python -m worker.discovery [run_dir]   (needs spec.json + hypotheses.json; phase 1 only)
@@ -12,7 +13,7 @@ from collections.abc import Callable
 
 from pydantic import BaseModel
 
-from worker.config import DISCOVERY, PARALLEL_FETCHES, PARALLEL_LLM_CALLS
+from worker.config import DISCOVERY, PARALLEL_FETCHES, PARALLEL_LLM_CALLS, SNOWBALL_SEED_TYPES
 from worker.discovery import channels
 from worker.discovery.domains import is_aggregator, normalize_domain
 from worker.parallel import run_parallel
@@ -41,6 +42,9 @@ class Discovery(BaseModel):
     partial: bool = False  # quota ran out before every channel call finished
 
 
+SCREENED_FIELDS = {"relevance", "relevance_reason", "holder_type", "data_owner", "contacts"}
+
+
 def merge(hits: list[Hit], previous: list[Candidate] = ()) -> list[Candidate]:
     """Dedupe by domain, keeping every channel, source URL and hypothesis that found it.
 
@@ -54,7 +58,7 @@ def merge(hits: list[Hit], previous: list[Candidate] = ()) -> list[Candidate]:
             continue
         c = by_domain.get(domain)
         if c is None:
-            keep = old[domain].model_dump(include={"relevance", "relevance_reason", "contacts"}) if domain in old else {}
+            keep = old[domain].model_dump(include=SCREENED_FIELDS) if domain in old else {}
             c = by_domain[domain] = Candidate(
                 name=h.name, website=h.website, domain=domain, channels=[], source_urls=[], **keep
             )
@@ -111,16 +115,20 @@ def discover(spec: DataSpec, hypotheses: list[HolderHypothesis], progress: Progr
          {"channel": "directory", "hypothesis": h.category})
         for h in hypotheses[: DISCOVERY["directory_hypotheses"]]
     ] + [
-        (f"(d) data marketplaces #{i + 1}", lambda: channels.marketplace(spec), {"channel": "marketplace"})
-        for i in range(DISCOVERY["marketplace_calls"])
+        (f"(d) data vendors: {angle}", lambda a=angle: channels.marketplace(spec, a), {"channel": "marketplace"})
+        for angle in list(channels.MARKETPLACE_ANGLES)[: DISCOVERY["marketplace_calls"]]
     ]
     hits, errors, partial = _run_channels(tasks, progress)
     return Discovery(hits=hits, candidates=merge(hits), errors=errors, partial=partial)
 
 
 def pick_seeds(candidates: list[Candidate], explicit: list[tuple[str, str]] = ()) -> list[tuple[str, str]]:
-    """Explicit seeds first, then screened "yes" companies, best-corroborated first."""
-    yes = sorted((c for c in candidates if c.relevance == "yes"), key=Candidate.corroboration, reverse=True)
+    """Explicit seeds first, then screened "yes" companies of SNOWBALL_SEED_TYPES,
+    best-corroborated first."""
+    yes = sorted(
+        (c for c in candidates if c.relevance == "yes" and c.holder_type in SNOWBALL_SEED_TYPES),
+        key=Candidate.corroboration, reverse=True,
+    )
     seen = {normalize_domain(w) for _, w in explicit}
     auto = [(c.name, c.website) for c in yes if c.domain not in seen]
     return (list(explicit) + auto)[: DISCOVERY["snowball_seeds"]]

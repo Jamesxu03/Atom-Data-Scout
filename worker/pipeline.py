@@ -202,9 +202,10 @@ def contacts_csv(candidates: list[Candidate]) -> str:
 def candidates_csv(candidates: list[Candidate]) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["name", "domain", "website", "relevance", "reason", "channels", "source_urls"])
+    w.writerow(["name", "domain", "website", "relevance", "holder_type", "data_owner", "reason",
+                "channels", "source_urls"])
     for c in candidates:
-        w.writerow([c.name, c.domain, c.website, c.relevance, c.relevance_reason,
+        w.writerow([c.name, c.domain, c.website, c.relevance, c.holder_type, c.data_owner, c.relevance_reason,
                     " ".join(c.channels), " ".join(c.source_urls)])
     return buf.getvalue()
 
