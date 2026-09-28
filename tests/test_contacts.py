@@ -105,3 +105,12 @@ def test_merge_keeps_name_whichever_order():
     for order in ([named_unverified, bare_verified], [bare_verified, named_unverified]):
         (jane,) = merge_contacts(order)
         assert (jane.name, jane.role, jane.verified, jane.source_url) == ("Jane Doe", "CEO", True, "site")
+
+
+def test_placeholder_phones_are_dropped():
+    from worker.steps.contacts import is_placeholder_phone
+
+    for junk in ["+1234567890", "123-456-7890", "000-000-0000", "(555) 555-5555", "0123456789", "12345"]:
+        assert is_placeholder_phone(junk), junk
+    for real in ["+44 20 7946 0001", "1-888-337-6411", "646-461-3400"]:
+        assert not is_placeholder_phone(real), real

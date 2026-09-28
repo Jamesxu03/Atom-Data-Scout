@@ -126,10 +126,18 @@ def screen(
     return candidates
 
 
+RELEVANCE_ORDER = {"yes": 0, "maybe": 1, "no": 2, None: 3}
+
+
+def rank(candidates: list[Candidate]) -> list[Candidate]:
+    """yes, maybe, no, unscreened; within each, best-corroborated first (found by more channels
+    and hypotheses, source confirmed, more sources) — not whichever search happened to finish first."""
+    return sorted(candidates, key=lambda c: (RELEVANCE_ORDER[c.relevance], tuple(-int(x) for x in c.corroboration())))
+
+
 def relevant(candidates: list[Candidate]) -> list[Candidate]:
-    """yes before maybe; no dropped."""
-    order = {"yes": 0, "maybe": 1}
-    return sorted((c for c in candidates if c.relevance in order), key=lambda c: order[c.relevance])
+    """yes and maybe, ranked; no and unscreened dropped."""
+    return [c for c in rank(candidates) if c.relevance in ("yes", "maybe")]
 
 
 if __name__ == "__main__":

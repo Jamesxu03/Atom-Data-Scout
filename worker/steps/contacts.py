@@ -97,6 +97,8 @@ def from_website(crawl: CrawlResult, html_for: Callable[[str], str] | None = Non
                 out.append(Contact(role=_inbox_role(email), email=email, source_url=page.url,
                                    origin="website", verified=True))
         for tel in dict.fromkeys(t.strip() for t in TEL_RE.findall(html)):
+            if is_placeholder_phone(tel):
+                continue
             out.append(Contact(role="Phone (website)", phone=tel, source_url=page.url,
                                origin="website", verified=True))
     return out
@@ -104,6 +106,17 @@ def from_website(crawl: CrawlResult, html_for: Callable[[str], str] | None = Non
 
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s)
+
+
+def is_placeholder_phone(phone: str) -> bool:
+    """Template numbers like +1234567890, 000-000-0000 or 555-5555 left in page markup."""
+    d = _digits(phone)
+    return (
+        len(d) < 7
+        or len(set(d)) <= 2
+        or d.lstrip("0") in "1234567890" * 2
+        or d.lstrip("1").startswith("5555")
+    )
 
 
 def _strip_code(html: str) -> str:
@@ -163,7 +176,10 @@ def from_search(candidate: Candidate, verifier: Callable[[Contact], bool] | None
         if not (f.name or f.email or f.phone):
             continue
         email = f.email.strip().lower() if f.email and EMAIL_RE.fullmatch(f.email.strip()) else None
-        out.append(Contact(**{**f.model_dump(), "email": email}, origin="search"))
+        phone = f.phone if f.phone and not is_placeholder_phone(f.phone) else None
+        if not (f.name or email or phone):
+            continue
+        out.append(Contact(**{**f.model_dump(), "email": email, "phone": phone}, origin="search"))
     with ThreadPoolExecutor(PARALLEL_FETCHES) as pool:  # each check fetches a page
         for c, ok in zip(out, pool.map(verifier, out)):
             c.verified = ok

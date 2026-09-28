@@ -89,3 +89,15 @@ def test_only_unlabelled_candidates_are_screened(fake_ask):
     screen(SPEC, [done, new], fetch=lambda url: fetched.append(url) or "text", progress=lambda _: None)
     assert fetched == ["https://yes-new.com"]
     assert (done.relevance, new.relevance) == ("no", "yes")
+
+
+def test_relevant_ranks_by_corroboration_not_arrival_order():
+    lone = _cand("lone.com")  # found once, by one channel
+    strong = _cand("strong.com")
+    strong.channels = ["product_search", "directory", "snowball"]
+    strong.hypotheses = ["h1", "h2"]
+    maybe = _cand("maybe.com")
+    maybe.channels = ["product_search", "directory", "snowball", "marketplace"]
+    for c, label in ((lone, "yes"), (strong, "yes"), (maybe, "maybe")):
+        c.relevance = label
+    assert [c.domain for c in relevant([lone, maybe, strong])] == ["strong.com", "lone.com", "maybe.com"]

@@ -81,6 +81,10 @@ class Candidate(BaseModel):
     # Filled by the contacts step (profiled companies only)
     contacts: list[Contact] = []
 
+    def corroboration(self) -> tuple[int, int, bool, int]:
+        """How well-supported this candidate is; higher sorts first among equal relevance."""
+        return (len(self.channels), len(self.hypotheses), self.source_verified, len(self.source_urls))
+
 
 class Funnel(BaseModel):
     found: int = 0  # raw hits across all channels

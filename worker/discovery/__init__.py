@@ -109,11 +109,7 @@ def discover(spec: DataSpec, hypotheses: list[HolderHypothesis], progress: Progr
 
 def pick_seeds(candidates: list[Candidate], explicit: list[tuple[str, str]] = ()) -> list[tuple[str, str]]:
     """Explicit seeds first, then screened "yes" companies, best-corroborated first."""
-    yes = sorted(
-        (c for c in candidates if c.relevance == "yes"),
-        key=lambda c: (len(c.channels), len(c.hypotheses), len(c.source_urls), c.source_verified),
-        reverse=True,
-    )
+    yes = sorted((c for c in candidates if c.relevance == "yes"), key=Candidate.corroboration, reverse=True)
     seen = {normalize_domain(w) for _, w in explicit}
     auto = [(c.name, c.website) for c in yes if c.domain not in seen]
     return (list(explicit) + auto)[: DISCOVERY["snowball_seeds"]]

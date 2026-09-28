@@ -26,7 +26,7 @@ from worker.scoring import compute_total
 from worker.steps.contacts import find_contacts
 from worker.steps.hypotheses import HypothesisList, hypotheses
 from worker.steps.parse_brief import parse_brief
-from worker.steps.screen import relevant, screen
+from worker.steps.screen import rank, relevant, screen
 
 Progress = Callable[[str], None]
 
@@ -93,6 +93,7 @@ def run(
         errors.append(f"Stopped early — Gemini quota: {str(e)[:300]}")
         progress("Quota ran out — saving what was found so far")
 
+    d.candidates = rank(d.candidates)
     runs.save(run_dir, "discovery", d)
     keep = relevant(d.candidates)
     funnel = Funnel(
