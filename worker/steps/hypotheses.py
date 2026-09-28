@@ -27,8 +27,7 @@ Think broadly:
 - Businesses whose product captures this data in normal operation (e.g. recording, hosting,
   transcribing, moderating, customer support).
 - Businesses whose staff or contractors produced it (e.g. labelling, research, outsourcing).
-- Businesses that are shut down, insolvent, in administration or liquidation — their data
-  assets are often sold off by administrators and are especially worth finding.
+- Companies anywhere in the world, not only in the buyer's country.
 - Niche or regional players, not just the famous ones.
 
 For each category:
@@ -46,9 +45,8 @@ How to write search_queries — this matters most:
 - Good (for meeting audio): "AI meeting assistant that records and transcribes calls",
   "conference call service for businesses", "sales call recording and coaching software".
 - Bad: "meeting audio dataset", "multi-speaker speech corpus", "buy transcribed audio".
-- Include at least one query that would surface companies that closed, went insolvent or
-  were acquired, still phrased around the product (e.g. "<product type> company shut down",
-  "<product type> startup acquired").
+- Vary the queries: different product names, customer types and regions, so they surface
+  different companies rather than the same market leaders.
 
 Order categories from most to least promising.
 

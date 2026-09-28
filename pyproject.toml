@@ -13,7 +13,6 @@ dependencies = [
     "trafilatura",
     "playwright",
     # database (phase 2 worker reads jobs from Supabase)
-    "supabase",
     # phase 1 UI
     "streamlit",
     "pandas",
