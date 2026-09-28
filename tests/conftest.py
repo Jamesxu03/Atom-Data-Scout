@@ -13,6 +13,7 @@ def no_network(monkeypatch):
 
     monkeypatch.setattr("worker.crawl._fetch_httpx", blocked)
     monkeypatch.setattr(httpx, "head", blocked)
+    monkeypatch.setattr("worker.crawl._recent_failures", {})
 
 
 @pytest.fixture

@@ -56,27 +56,45 @@ def test_screen_batches(fake_ask):
     assert all(c.relevance == "yes" for c in cands)
 
 
-def test_dead_domain_dropped_blocked_site_kept(fake_ask):
+def _connect_error(cause: Exception):
+    """httpx.ConnectError the way httpx raises it: chained from the socket/ssl error."""
+    import httpx
+
+    try:
+        try:
+            raise cause
+        except Exception as inner:
+            raise httpx.ConnectError(str(inner)) from inner
+    except httpx.ConnectError as e:
+        return e
+
+
+def test_only_dns_failure_counts_as_dead_site(fake_ask):
+    import socket
+    import ssl
+
     import httpx
 
     fake_ask.responses[ScreenBatch] = _label_by_prefix
-    cands = [_cand(d) for d in ["made-up.com", "blocked.com", "slow.com"]]
+    names = ["made-up.com", "refused.com", "bad-cert.com", "blocked.com", "slow.com"]
+    cands = [_cand(d) for d in names]
     req = httpx.Request("GET", "https://blocked.com")
+    errors = {
+        "made-up": _connect_error(socket.gaierror(8, "nodename nor servname provided")),
+        "refused": _connect_error(ConnectionRefusedError(61, "Connection refused")),
+        "bad-cert": _connect_error(ssl.SSLCertVerificationError("certificate has expired")),
+        "blocked": httpx.HTTPStatusError("403", request=req, response=httpx.Response(403, request=req)),
+        "slow": httpx.ReadTimeout("timed out"),
+    }
 
     def fetch(url):
-        if "made-up" in url:
-            raise httpx.ConnectError("nodename nor servname provided")
-        if "blocked" in url:
-            raise httpx.HTTPStatusError("403", request=req, response=httpx.Response(403, request=req))
-        raise httpx.ReadTimeout("timed out")
+        raise next(e for key, e in errors.items() if key in url)
 
     screen(SPEC, cands, fetch=fetch, progress=lambda _: None)
     by = {c.domain: c for c in cands}
-    assert by["made-up.com"].relevance == "no"
-    assert "dead website" in by["made-up.com"].relevance_reason
-    assert by["blocked.com"].relevance == "maybe"
-    assert by["slow.com"].relevance == "maybe"
-    assert [c.domain for c in relevant(cands)] == ["blocked.com", "slow.com"]
+    assert (by["made-up.com"].relevance, by["made-up.com"].relevance_reason) == ("no", "dead website: domain doesn't exist")
+    for d in names[1:]:  # real companies do these to crawlers: keep them
+        assert by[d].relevance == "maybe", d
     assert fake_ask.calls == []  # nothing reachable, nothing sent to the model
 
 

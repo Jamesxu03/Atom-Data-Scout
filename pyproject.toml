@@ -1,7 +1,7 @@
 [project]
 name = "atom-data-scout"
 version = "0.1.0"
-description = "Find and rank data-source companies: search, crawl, Gemini extraction, scoring, daily distress scan"
+description = "Find companies likely to hold the data a buyer wants, screen them, and find contacts"
 requires-python = ">=3.12"
 dependencies = [
     # LLM
@@ -12,8 +12,7 @@ dependencies = [
     "httpx",
     "trafilatura",
     "playwright",
-    # database (phase 2 worker reads jobs from Supabase)
-    # phase 1 UI
+    # UI
     "streamlit",
     "pandas",
     # config

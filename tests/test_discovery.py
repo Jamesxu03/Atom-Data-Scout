@@ -180,13 +180,13 @@ def test_unresolvable_redirect_is_kept_but_unverified(monkeypatch):
 def test_check_sources_only_for_given_domains_and_only_once(monkeypatch):
     from worker.discovery import check_sources
 
-    checked = []
+    fetched = []
 
-    def fake_verify(found):
-        checked.append(found.website)
-        return found.source_url + "#real", True
+    def fake_page(url):
+        fetched.append(url)
+        return url + "#real", "<p>Keep, Keep2 and Keep3 are great</p>", False
 
-    monkeypatch.setattr(channels, "verify_source", fake_verify)
+    monkeypatch.setattr(channels, "check_source_page", fake_page)
     hits = [
         Hit(channel="product_search", name="Keep", website="https://keep.com", source_url="s1"),
         Hit(channel="product_search", name="Drop", website="https://drop.com", source_url="s2"),
@@ -195,7 +195,28 @@ def test_check_sources_only_for_given_domains_and_only_once(monkeypatch):
     d = check_sources(d, {"keep.com"}, **QUIET)
     d = check_sources(d, {"keep.com"}, **QUIET)  # second call: nothing new to fetch
 
-    assert checked == ["https://keep.com"]
+    assert fetched == ["s1"]
     by = {c.domain: c for c in d.candidates}
     assert by["keep.com"].source_verified and by["keep.com"].source_urls == ["s1#real"]
     assert not by["drop.com"].source_verified and by["drop.com"].source_urls == ["s2"]
+
+
+def test_shared_directory_page_is_fetched_once(monkeypatch):
+    from worker.discovery import check_sources
+
+    fetched = []
+
+    def fake_page(url):
+        fetched.append(url)
+        return url, "<p>" + " ".join(f"Vendor{i}" for i in range(0, 10, 2)) + "</p>", False
+
+    monkeypatch.setattr(channels, "check_source_page", fake_page)
+    g2 = "https://www.g2.com/categories/meeting-assistants"
+    hits = [Hit(channel="directory", name=f"Vendor{i}", website=f"https://vendor{i}.com", source_url=g2)
+            for i in range(10)]
+    d = Discovery(hits=hits, candidates=merge(hits))
+    d = check_sources(d, {c.domain for c in d.candidates}, **QUIET)
+
+    assert fetched == [g2]  # ten companies, one request
+    verified = sorted(c.domain for c in d.candidates if c.source_verified)
+    assert verified == [f"vendor{i}.com" for i in range(0, 10, 2)]  # only those named on the page

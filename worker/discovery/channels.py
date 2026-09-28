@@ -47,22 +47,27 @@ def _mentions(html: str, name: str, website: str) -> bool:
     return bool(words) and " ".join(words) in re.sub(r"[^a-z0-9 ]", " ", text)
 
 
-def verify_source(found: Found) -> tuple[str, bool]:
-    """(real source URL, verified).
+def check_source_page(url: str) -> tuple[str, str | None, bool]:
+    """(real URL, page HTML or None, grounded) for one source URL — fetched once, however many
+    companies were found on it.
 
-    The search response doesn't list the pages it used, so check directly: a grounding
-    redirect only resolves if Google issued it; a URL the model wrote itself must load and
-    mention the company.
+    The search response doesn't list the pages it used, so we check directly: a grounding
+    redirect only resolves if Google issued it (grounded=True, no fetch needed); any other
+    URL the model wrote itself is fetched so callers can check it mentions the company.
     """
-    url = found.source_url
     if GROUNDING_REDIRECT in url:
         resolved = resolve_source(url)
-        return resolved, resolved != url
+        return resolved, None, resolved != url
     try:
-        html = fetch_html_quick(url)
+        return url, fetch_html_quick(url), False
     except Exception:  # dead or blocked page: can't confirm the company was listed there
-        return url, False
-    return url, _mentions(html, found.name, found.website)
+        return url, None, False
+
+
+def verify_source(found: Found, page: tuple[str, str | None, bool] | None = None) -> tuple[str, bool]:
+    """(real source URL, verified) for one company. Pass `page` to reuse a fetched page."""
+    url, html, grounded = page or check_source_page(found.source_url)
+    return url, grounded or (html is not None and _mentions(html, found.name, found.website))
 
 
 def _search(prompt: str) -> list[Found]:

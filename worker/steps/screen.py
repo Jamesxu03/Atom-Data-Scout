@@ -4,6 +4,7 @@ Only yes and maybe go on to the deep crawl.
 Run: uv run python -m worker.steps.screen [run_dir]   (needs spec.json + discovery.json)
 """
 
+import socket
 from collections.abc import Callable
 
 import httpx
@@ -69,9 +70,17 @@ def _label_batch(spec: DataSpec, batch: list[tuple[Candidate, str]]) -> dict[str
     return {item.domain.lower(): item for item in result.results}
 
 
-# Domain doesn't resolve, refuses connections or isn't a valid URL: usually a website the model
-# made up. 403s, timeouts and 5xx are different — often bot protection on a real site.
-DEAD_SITE_ERRORS = (httpx.ConnectError, httpx.UnsupportedProtocol, httpx.InvalidURL)
+def is_dead_site(e: Exception) -> bool:
+    """The domain doesn't exist (DNS lookup failed) or the URL is invalid: usually a website the
+    model made up. Refused/reset connections, TLS errors, 403s and timeouts are different —
+    real companies do those to crawlers — so they stay "maybe"."""
+    if isinstance(e, (httpx.UnsupportedProtocol, httpx.InvalidURL)):
+        return True
+    while e is not None:
+        if isinstance(e, socket.gaierror):
+            return True
+        e = e.__cause__ or e.__context__
+    return False
 
 
 def screen(
@@ -93,12 +102,11 @@ def screen(
         """Homepage text, or None with the failure recorded on the candidate."""
         try:
             return fetch(c.website)
-        except DEAD_SITE_ERRORS as e:
-            c.relevance = "no"
-            c.relevance_reason = f"dead website: {type(e).__name__} (domain doesn't resolve or refuses connections)"
         except Exception as e:
-            # Can't judge without a homepage; keep it rather than lose a real company to a bot block
-            c.relevance, c.relevance_reason = "maybe", f"homepage unreachable ({type(e).__name__})"
+            if is_dead_site(e):
+                c.relevance, c.relevance_reason = "no", "dead website: domain doesn't exist"
+            else:  # can't judge without a homepage; keep it rather than lose a real company
+                c.relevance, c.relevance_reason = "maybe", f"homepage unreachable ({type(e).__name__})"
         return None
 
     progress(f"Fetching {len(todo)} homepages")

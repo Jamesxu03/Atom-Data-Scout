@@ -8,7 +8,11 @@ Never raises for a bad site — failures are recorded in CrawlResult.errors.
 """
 
 import hashlib
+import os
 import re
+import tempfile
+import threading
+import time
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -22,6 +26,8 @@ MIN_TEXT_CHARS = 200  # less than this = probably a JS shell, try playwright
 # 5s to connect, 10s per read: a site that slow is treated as unreachable ("maybe"), not waited on
 HTTP_TIMEOUT = httpx.Timeout(10, connect=5)
 RENDER_SETTLE_MS = 3000  # max wait for client-side rendering after DOMContentLoaded
+CACHE_TTL_SECONDS = 7 * 24 * 3600  # re-fetch pages older than a week (policies change)
+FAILURE_MEMO_SECONDS = 60  # a URL that just failed isn't re-requested by other threads
 
 LINK_PATTERNS = {
     "privacy": re.compile(r"privacy|data[-_ ]?protection|gdpr", re.I),
@@ -53,12 +59,39 @@ def _cache_path(url: str, rendered: bool = False) -> Path:
 
 
 def _read_cache(path: Path) -> str | None:
-    return path.read_text(encoding="utf-8", errors="ignore") if path.exists() else None
+    """Cached HTML, or None if missing or older than CACHE_TTL_SECONDS."""
+    try:
+        if time.time() - path.stat().st_mtime > CACHE_TTL_SECONDS:
+            return None
+        return path.read_text(encoding="utf-8", errors="ignore")
+    except FileNotFoundError:
+        return None
 
 
 def _write_cache(path: Path, html: str) -> None:
+    """Write to a temp file then rename, so a reader never sees half a page."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(html, encoding="utf-8")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(html)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+# One fetch per URL at a time: threads asking for a page that's already being fetched wait
+# for it (then read the cache) instead of hitting the site again — directory pages listing
+# ten companies would otherwise be requested ten times at once and get us blocked.
+_url_locks: dict[str, threading.Lock] = {}
+_url_locks_guard = threading.Lock()
+_recent_failures: dict[str, tuple[float, Exception]] = {}
+
+
+def _lock_for(url: str) -> threading.Lock:
+    with _url_locks_guard:
+        return _url_locks.setdefault(url, threading.Lock())
 
 
 def _fetch_httpx(url: str) -> str:
@@ -116,11 +149,19 @@ def fetch_html_quick(url: str) -> str:
     if not url.startswith("http"):
         url = "https://" + url
     path = _cache_path(url)
-    html = _read_cache(path)
-    if html is None:
-        html = _fetch_httpx(url)
+    with _lock_for(url):
+        if (html := _read_cache(path)) is not None:
+            return html
+        failed = _recent_failures.get(url)
+        if failed and time.time() - failed[0] < FAILURE_MEMO_SECONDS:
+            raise failed[1]
+        try:
+            html = _fetch_httpx(url)
+        except Exception as e:
+            _recent_failures[url] = (time.time(), e)
+            raise
         _write_cache(path, html)
-    return html
+        return html
 
 
 def fetch_html(url: str, browser: Browser | None = None) -> str:

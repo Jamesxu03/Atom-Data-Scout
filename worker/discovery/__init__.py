@@ -74,17 +74,19 @@ def check_sources(d: Discovery, domains: set[str], progress: Progress = print) -
     Each hit is checked once; call again after snowballing and only the new hits are fetched.
     """
     todo = [h for h in d.hits if not h.source_checked and normalize_domain(h.website) in domains]
-    if todo:
-        progress(f"Checking {len(todo)} source pages")
+    urls = list(dict.fromkeys(h.source_url for h in todo))  # a directory page lists many companies
+    if urls:
+        progress(f"Checking {len(urls)} source pages for {len(todo)} results")
         batch = run_parallel(
-            [(str(i), lambda h=h: channels.verify_source(Found(**h.model_dump(include={"name", "website", "source_url"}))))
-             for i, h in enumerate(todo)],
+            [(url, lambda url=url: channels.check_source_page(url)) for url in urls],
             workers=PARALLEL_FETCHES,
             progress=lambda _: None,
         )
-        for label, (url, ok) in batch.results:
-            todo[int(label)].source_url, todo[int(label)].source_verified = url, ok
+        pages = dict(batch.results)
         for h in todo:
+            if h.source_url in pages:
+                found = Found(**h.model_dump(include={"name", "website", "source_url"}))
+                h.source_url, h.source_verified = channels.verify_source(found, pages[h.source_url])
             h.source_checked = True
     return d.model_copy(update={"candidates": merge(d.hits, previous=d.candidates)})
 
