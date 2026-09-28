@@ -35,16 +35,22 @@ def resolve_source(url: str) -> str:
         return url
 
 
-def _mentions(html: str, name: str, website: str) -> bool:
-    """Does the page mention the company, by domain name (e.g. 'fireflies') or full name?"""
-    text = html.lower()
+def mention_at(text: str, name: str, website: str) -> int:
+    """Where the text first mentions the company, by domain name (e.g. 'fireflies') or full
+    name; -1 if it doesn't."""
+    text = text.lower()
     domain = normalize_domain(website) or ""
     labels = domain.split(".")
     brand = labels[-2] if len(labels) >= 2 else ""
-    if len(brand) >= 3 and brand in text:
-        return True
+    if len(brand) >= 3 and (i := text.find(brand)) >= 0:
+        return i
     words = re.sub(r"[^a-z0-9 ]", " ", name.lower()).split()
-    return bool(words) and " ".join(words) in re.sub(r"[^a-z0-9 ]", " ", text)
+    # one space per replaced character, so positions still match the original text
+    return re.sub(r"[^a-z0-9 ]", " ", text).find(" ".join(words)) if words else -1
+
+
+def _mentions(html: str, name: str, website: str) -> bool:
+    return mention_at(html, name, website) >= 0
 
 
 def check_source_page(url: str) -> tuple[str, str | None, bool]:
@@ -88,8 +94,19 @@ Search with these queries (and close variations):
 Include small, niche, regional and defunct companies, not only market leaders.""")
 
 
-def snowball(seed_name: str, seed_website: str) -> list[Found]:
-    """(b) Find competitors of a known relevant company via comparison pages."""
+def snowball(seed_name: str, seed_website: str, languages: list[str] = ()) -> list[Found]:
+    """(b) Find competitors of a known relevant company via comparison pages.
+
+    With `languages`, only competitors working in one of them: "alternatives to X" pages
+    mostly list global, English-first tools, which add volume but not the language.
+    """
+    language_rule = f"""
+
+The buyer needs data in: {", ".join(languages)}. Only return competitors with evidence of
+working in at least one of these languages: a site written in it, the language named as
+supported, or a base in a country where it is spoken. A generic "100+ languages" claim is
+not evidence. Also look for local competitors, e.g. search "{seed_name} alternative" together
+with a language or country name, and search in those languages.""" if languages else ""
     return _search(f"""Find companies that compete with {seed_name} ({seed_website}) —
 businesses offering a similar product to a similar customer.
 
@@ -99,7 +116,7 @@ Search for pages such as:
 - "{seed_name} competitors"
 - "best {seed_name} alternatives"
 
-Collect the competing companies named on those pages. Do not return {seed_name} itself.""")
+Collect the competing companies named on those pages. Do not return {seed_name} itself.{language_rule}""")
 
 
 def directory(h: HolderHypothesis) -> list[Found]:
@@ -151,3 +168,37 @@ def marketplace(spec: DataSpec, angle: str) -> list[Found]:
 
 Also search with the terms data vendors and researchers use for this kind of data, which
 may differ from the wording above (e.g. "egocentric" for first-person video).""")
+
+
+# (e) Holders that aren't companies, or that hold public bodies' recordings. What they publish
+# often comes with a clear (sometimes open) licence, and the company-shaped channels above
+# never find them.
+PUBLIC_ANGLES = {
+    "open corpora": """Search language-resource and research-data repositories (the ELRA/ELDA
+catalogue, CLARIN centres, European Language Grid, LDC, Zenodo, university and national
+language-technology sites) and research papers for corpora or datasets of this kind, e.g.
+"{data_type} corpus", including ones built from parliament, court or broadcast recordings.
+Return the organisation that publishes or distributes each one (repository, research
+institute, university or public body). website must be that organisation's homepage, not a
+general hosting site such as Hugging Face or GitHub. source_url must be the corpus page or
+paper.""",
+    "public recordings": """Search for public bodies that record and publish this kind of
+data themselves (for meetings and speech: parliaments, regional and city councils, courts,
+public broadcasters with session archives) and for the companies whose recording, streaming
+or minutes platforms capture it for them. Return the public body or the platform company.
+source_url must be the page with the recordings, or the page describing the platform.""",
+}
+
+
+def public_source(spec: DataSpec, angle: str) -> list[Found]:
+    """(e) Organisations, not only companies, that publish this kind of data, from one angle."""
+    local = (f"\n\nAlso search in {', '.join(spec.languages)}: local bodies, platforms and "
+             "corpora are often only described in their own language.") if spec.languages else ""
+    return _search(f"""Find organisations — not only companies — that hold or publish data
+similar to this:
+- data type: {spec.data_type}
+- scenarios: {", ".join(spec.scenarios) or "any"}
+- languages: {", ".join(spec.languages) or "any"}
+- labels: {", ".join(spec.label_types) or "none"}
+
+{PUBLIC_ANGLES[angle].format(data_type=spec.data_type)}{local}""")

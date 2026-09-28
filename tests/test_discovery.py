@@ -60,6 +60,9 @@ def _router(prompt: str) -> FoundList:
         ])
     if "already produce or sell data" in prompt:
         return FoundList(companies=[Found(name="DataCo", website="https://dataco.io", source_url="https://datarade.ai/x")])
+    if "not only companies" in prompt:
+        return FoundList(companies=[Found(name="Parliament", website="https://parliament.example",
+                                          source_url="https://parliament.example/sessions")])
     query = prompt.split("- query ")[1].split("\n")[0]
     return FoundList(companies=[
         Found(name="Otter", website="https://otter.ai", source_url="https://google.com/1"),
@@ -72,17 +75,22 @@ def test_discover_runs_phase_one_channels_within_budget(fake_ask):
     d = discover(SPEC, HYPS, **QUIET)
 
     angles = min(DISCOVERY["marketplace_calls"], len(channels.MARKETPLACE_ANGLES))
-    expected = DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"] + angles
+    public = min(DISCOVERY["public_source_calls"], len(channels.PUBLIC_ANGLES))
+    expected = DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"] + angles + public
     assert len(fake_ask.calls) == expected
     assert all(c.use_search for c in fake_ask.calls)
     assert not any("compete with" in c.prompt for c in fake_ask.calls)  # no snowball yet
     vendor_prompts = [c.prompt for c in fake_ask.calls if "already produce or sell data" in c.prompt]
     assert len(set(vendor_prompts)) == angles  # each call searches from a different angle
+    public_prompts = [c.prompt for c in fake_ask.calls if "not only companies" in c.prompt]
+    assert len(set(public_prompts)) == public
+    assert all("Also search in English" in p for p in public_prompts)
 
     by_domain = {c.domain: c for c in d.candidates}
     assert set(by_domain["otter.ai"].channels) == {"product_search", "directory"}
     assert "g2.com" not in by_domain  # directories are sources, not candidates
     assert by_domain["dataco.io"].channels == ["marketplace"]
+    assert by_domain["parliament.example"].channels == ["public_source"]
     assert len(d.hits) > len(d.candidates)
     assert not d.partial
 
@@ -118,6 +126,16 @@ def test_snowball_adds_competitors_and_keeps_labels(fake_ask):
     assert by_domain["rival-otter.com"].relevance is None  # new: needs screening
     assert by_domain["otter.ai"].relevance == "yes"  # kept
     assert [h.seed for h in d2.hits if h.channel == "snowball"] == ["Otter"]
+    assert "buyer needs data in" not in fake_ask.calls[-1].prompt  # no languages given
+
+
+def test_snowball_limited_to_the_briefs_languages(fake_ask):
+    fake_ask.responses[FoundList] = _router
+    d = Discovery(hits=[], candidates=[])
+    snowball(d, [("Beey", "https://beey.io")], languages=["Estonian", "Slovak"], **QUIET)
+    (call,) = fake_ask.calls
+    assert "The buyer needs data in: Estonian, Slovak" in call.prompt
+    assert '"100+ languages"' in call.prompt  # global tools' generic claim doesn't count
 
 
 def test_failed_channel_call_is_recorded_not_fatal(fake_ask):

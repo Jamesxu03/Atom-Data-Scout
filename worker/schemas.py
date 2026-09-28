@@ -32,11 +32,13 @@ class HolderHypothesis(BaseModel):
     )
 
 
-Channel = Literal["product_search", "snowball", "directory", "marketplace"]
+Channel = Literal["product_search", "snowball", "directory", "marketplace", "public_source"]
 Relevance = Literal["yes", "maybe", "no"]
-# vendor: collects or sells this data as its business; by_product: its product captures it in
-# normal operation; technology: makes tools or hardware for it but doesn't keep it at scale
-HolderType = Literal["vendor", "by_product", "technology", "unrelated"]
+# vendor: sells data it owns or collects it to order; public: a public body, research institute
+# or repository that publishes it (corpora, parliament recordings); by_product: its product or
+# service captures it in normal operation; technology: makes tools or hardware for it but
+# doesn't keep it at scale
+HolderType = Literal["vendor", "public", "by_product", "technology", "unrelated"]
 DataOwner = Literal["company", "customers", "unclear"]
 
 
@@ -84,6 +86,7 @@ class Candidate(BaseModel):
     relevance_reason: str | None = None
     holder_type: HolderType | None = None
     data_owner: DataOwner | None = None
+    languages: list[str] = Field(default=[], description="Buyer's languages it shows evidence of working in")
     # Filled by the contacts step (profiled companies only)
     contacts: list[Contact] = []
 

@@ -1,12 +1,16 @@
 # Atom Data Scout
 
 Internal tool: given a buyer's data brief, find companies likely to hold that data as a
-by-product of their business, check they're relevant, and find people to contact.
+by-product of their business (plus data vendors and public sources such as corpora and
+parliament recordings), check they're relevant, and find people to contact.
 
 ```
-brief → data spec → holder hypotheses → discovery (4 channels) → relevance + holder-type screen
-      → snowball from relevant companies → screen → deep crawl + contacts
+brief → data spec → holder hypotheses → discovery (5 channels) → source checks
+      → relevance + holder-type + language screen (homepage + source page)
+      → snowball from relevant companies, in the brief's languages → screen → deep crawl + contacts
 ```
+
+The screen caps "yes" at "maybe" when a company shows no evidence of the brief's languages.
 
 Every Gemini call uses `gemini-3.8-flash` (see `worker/config.py`). Independent calls and
 page fetches run in parallel, and each step's time is shown and saved in `output.json`.
@@ -19,7 +23,8 @@ worker/
   config.py             model, thinking level, concurrency, budgets, score weights
   llm.py                ask(): structured output, retries, optional Google Search
   pipeline.py           runs every step; saves each stage under data/runs/<time>/
-  discovery/            product search, snowball, directories, data vendors; dedupe by domain
+  discovery/            product search, snowball, directories, data vendors, public sources;
+                        dedupe by domain
   steps/                parse_brief, hypotheses, screen, contacts
   crawl.py              homepage / privacy / terms / contact pages (httpx, playwright fallback)
   parallel.py           thread pool that keeps finished results if the quota runs out

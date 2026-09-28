@@ -19,7 +19,7 @@ from worker.discovery.domains import normalize_domain
 from worker.schemas import Candidate
 
 SEEDS_CSV = Path(__file__).parent / "seed_companies.csv"
-CHANNELS = ["product_search", "snowball", "directory", "marketplace"]
+CHANNELS = ["product_search", "snowball", "directory", "marketplace", "public_source"]
 
 
 class Seed(BaseModel):

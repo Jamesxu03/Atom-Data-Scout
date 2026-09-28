@@ -16,7 +16,8 @@ def _otter_yes_rest_no(prompt: str) -> ScreenBatch:
     domains = [line[4:].split(" ")[0] for line in prompt.splitlines() if line.startswith("### ")]
     return ScreenBatch(results=[
         ScreenItem(domain=d, holder_type="by_product" if d == "otter.ai" else "unrelated",
-                   data_owner="customers", label="yes" if d == "otter.ai" else "no", reason="r")
+                   data_owner="customers", languages=["English"],
+                   label="yes" if d == "otter.ai" else "no", reason="r")
         for d in domains
     ])
 
@@ -50,6 +51,7 @@ def test_live_run_funnel(fake_ask, monkeypatch, tmp_path):
     # snowball ran after screening, seeded from the one "yes" company
     snowball_prompts = [c.prompt for c in fake_ask.calls if "compete with" in c.prompt]
     assert len(snowball_prompts) == 1 and "compete with Otter" in snowball_prompts[0]
+    assert "The buyer needs data in: English" in snowball_prompts[0]
     rival = next(c for c in out.candidates if c.domain == "rival-otter.com")
     assert rival.relevance == "no"  # new snowball company was screened too
     assert not out.partial
@@ -63,14 +65,14 @@ def test_live_run_funnel(fake_ask, monkeypatch, tmp_path):
     for step in ("Analyse brief", "Hypotheses", "Discovery searches", "Screen", "Source checks",
                  "Snowball searches", "Screen new", "Deep crawl + contacts", "total"):
         assert step in out.timings, step
-    # sources are only checked for companies the screen kept
+    # sources are checked before screening, so every company has a verdict, not just kept ones
     d = runs.load(tmp_path / out.run_dir.split("/")[-1], "discovery", Discovery)
-    kept = {c.domain for c in out.candidates if c.relevance in ("yes", "maybe")}
+    domains = {c.domain for c in out.candidates}
     for h in d.hits:
-        if normalize_domain(h.website) in kept:
-            assert h.source_checked, h
-        elif h.website and "g2.com" not in h.website:
-            assert not h.source_checked, h
+        assert h.source_checked == (normalize_domain(h.website) in domains), h
+    csv_rows = pipeline.candidates_csv(out.candidates).splitlines()
+    assert "source_verified" in csv_rows[0] and "languages" in csv_rows[0]
+    assert any(row.startswith("Otter,otter.ai,") and ",English," in row for row in csv_rows)
     for name in ("spec", "hypotheses", "discovery", "output"):
         assert (tmp_path / out.run_dir.split("/")[-1] / f"{name}.json").exists()
 

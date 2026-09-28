@@ -1,7 +1,10 @@
+import httpx
+import pytest
+
 from tests.test_hypotheses import SPEC
 from worker.config import SCREEN_BATCH_SIZE
 from worker.schemas import Candidate
-from worker.steps.screen import ScreenBatch, ScreenItem, relevant, screen
+from worker.steps.screen import ScreenBatch, ScreenItem, relevant, screen, source_excerpt
 
 
 def _cand(domain):
@@ -10,7 +13,8 @@ def _cand(domain):
 
 
 def _label_by_prefix(prompt):
-    """yes-* -> yes, maybe-* -> maybe, else no; skips 'silent-*' to test missing labels."""
+    """yes-* -> yes, maybe-* -> maybe, else no; skips 'silent-*' to test missing labels.
+    Evidence for English unless the domain has 'nolang'."""
     items = []
     for line in prompt.splitlines():
         if line.startswith("### "):
@@ -20,6 +24,7 @@ def _label_by_prefix(prompt):
             label = domain.split("-")[0] if domain.split("-")[0] in ("yes", "maybe") else "no"
             holder = "technology" if "tech" in domain else "unrelated" if label == "no" else "by_product"
             items.append(ScreenItem(domain=domain.upper(), holder_type=holder, data_owner="unclear",
+                                    languages=[] if "nolang" in domain else ["english"],
                                     label=label, reason=f"because {domain}"))
     return ScreenBatch(results=items)
 
@@ -39,6 +44,7 @@ def test_screen_labels_and_filters(fake_ask):
     assert by["yes-a.com"].relevance == "yes"
     assert by["yes-a.com"].relevance_reason == "because yes-a.com"
     assert (by["yes-a.com"].holder_type, by["yes-a.com"].data_owner) == ("by_product", "unclear")
+    assert by["yes-a.com"].languages == ["English"]  # the buyer's spelling, not the model's
     assert by["no-c.com"].relevance == "no"
     assert by["down.com"].relevance == "maybe"  # unreachable is kept, not judged
     assert by["down.com"].holder_type is None
@@ -140,8 +146,116 @@ def test_rank_by_holder_type_before_corroboration():
 
     famous = screened("famous.com", "yes", "by_product", ["product_search", "directory", "snowball"])
     vendor = screened("vendor.com", "yes", "vendor", ["marketplace"])
+    corpus = screened("corpus.org", "yes", "public", ["public_source"])
     niche = screened("niche.com", "yes", "by_product")
     tech = screened("tech.com", "maybe", "technology", ["product_search", "directory"])
     maybe_vendor = screened("maybe-vendor.com", "maybe", "vendor")
-    order = [c.domain for c in relevant([tech, niche, famous, maybe_vendor, vendor])]
-    assert order == ["vendor.com", "famous.com", "niche.com", "maybe-vendor.com", "tech.com"]
+    order = [c.domain for c in relevant([tech, niche, famous, corpus, maybe_vendor, vendor])]
+    assert order == ["vendor.com", "corpus.org", "famous.com", "niche.com", "maybe-vendor.com", "tech.com"]
+
+
+def test_no_language_evidence_caps_yes_at_maybe(fake_ask):
+    fake_ask.responses[ScreenBatch] = _label_by_prefix
+    local, global_tool = _cand("yes-local.com"), _cand("yes-nolang.com")
+    screen(SPEC, [local, global_tool], fetch=lambda _: "text", progress=lambda _: None)
+    assert (local.relevance, local.languages) == ("yes", ["English"])
+    assert (global_tool.relevance, global_tool.languages) == ("maybe", [])
+    assert global_tool.relevance_reason.endswith("(no evidence of the buyer's languages)")
+    assert '"100+ languages" is not evidence' in fake_ask.calls[0].prompt
+
+
+def test_only_the_briefs_languages_count(fake_ask):
+    def answer(prompt):
+        return ScreenBatch(results=[
+            ScreenItem(domain="tilde.ee", holder_type="vendor", data_owner="company",
+                       languages=[" latvian", "French"], label="yes", reason="Baltic speech data"),
+            ScreenItem(domain="global.com", holder_type="by_product", data_owner="customers",
+                       languages=["French", "German"], label="yes", reason="notetaker"),
+        ])
+
+    fake_ask.responses[ScreenBatch] = answer
+    spec = SPEC.model_copy(update={"languages": ["Estonian", "Latvian"]})
+    tilde, other = _cand("tilde.ee"), _cand("global.com")
+    screen(spec, [tilde, other], fetch=lambda _: "text", progress=lambda _: None)
+    assert (tilde.relevance, tilde.languages) == ("yes", ["Latvian"])
+    assert (other.relevance, other.languages) == ("maybe", [])
+
+
+def test_language_check_skipped_when_brief_names_none(fake_ask):
+    fake_ask.responses[ScreenBatch] = _label_by_prefix
+    c = _cand("yes-nolang.com")
+    screen(SPEC.model_copy(update={"languages": []}), [c], fetch=lambda _: "text", progress=lambda _: None)
+    assert c.relevance == "yes"
+
+
+def test_vendor_working_on_customers_data_is_by_product(fake_ask):
+    def answer(prompt):
+        return ScreenBatch(results=[
+            ScreenItem(domain="agency.lt", holder_type="vendor", data_owner="customers",
+                       languages=["English"], label="yes", reason="interpreting and transcription agency"),
+            ScreenItem(domain="data.com", holder_type="vendor", data_owner="company",
+                       languages=["English"], label="yes", reason="sells meeting datasets"),
+        ])
+
+    fake_ask.responses[ScreenBatch] = answer
+    agency, seller = _cand("agency.lt"), _cand("data.com")
+    screen(SPEC, [agency, seller], fetch=lambda _: "text", progress=lambda _: None)
+    assert (agency.holder_type, agency.data_owner, agency.relevance) == ("by_product", "customers", "yes")
+    assert seller.holder_type == "vendor"
+
+
+def test_screen_sends_homepage_and_source_page(fake_ask):
+    fake_ask.responses[ScreenBatch] = _label_by_prefix
+    with_src, without = _cand("yes-a.com"), _cand("yes-b.com")
+    excerpts = {"yes-a.com": "Source page on its own site (x):\nmultilingual speech data collection"}
+    screen(SPEC, [with_src, without], fetch=lambda url: f"translation services {url}",
+           source=lambda c: excerpts.get(c.domain), progress=lambda _: None)
+    (call,) = fake_ask.calls
+    a, b = call.prompt.split("### yes-a.com")[1].split("### yes-b.com")
+    assert "translation services" in a and "multilingual speech data collection" in a
+    assert "Source page" not in b
+
+
+PARAGRAPH = "<p>{}</p>"
+
+
+def _page(*paragraphs):
+    return "<html><body><article>" + "".join(PARAGRAPH.format(p) for p in paragraphs) + "</article></body></html>"
+
+
+def test_source_excerpt_prefers_own_site_and_quotes_other_sites_around_the_mention():
+    filler = [f"Paragraph {i} is about transcription tools in general and nothing specific." for i in range(40)]
+    pages = {
+        "https://acme.com/speech-data": _page(
+            "Speech data collection for AI training.",
+            "We record consented multi-speaker conversations in Estonian, Latvian and Lithuanian, "
+            "with verbatim transcripts and speaker labels, for companies building speech models.",
+        ),
+        "https://blog.example/best": _page(*filler, "Acme offers Estonian meeting transcription for councils."),
+        "https://blog.example/unrelated": _page(*filler),
+    }
+
+    def fetch(url):
+        if url not in pages:
+            raise httpx.ConnectError("down")
+        return pages[url]
+
+    c = _cand("acme.com")
+    c.name = "Acme"
+
+    c.source_urls = ["https://blog.example/best", "https://acme.com/speech-data"]
+    own = source_excerpt(c, fetch)
+    assert own.startswith("Source page on its own site (https://acme.com/speech-data)")
+    assert "Estonian, Latvian and Lithuanian" in own
+
+    c.source_urls = ["https://acme.com/gone", "https://blog.example/best"]  # own page down: use the other
+    other = source_excerpt(c, fetch)
+    assert other.startswith("Source page on another site (https://blog.example/best)")
+    assert "Acme offers Estonian meeting transcription" in other
+    assert "Paragraph 0 " not in other  # only the passage around the mention
+
+    c.source_urls = ["https://blog.example/unrelated"]  # doesn't mention the company
+    assert source_excerpt(c, fetch) is None
+
+    c.source_urls = ["https://acme.com/", "https://www.acme.com"]  # the homepage is already sent
+    assert source_excerpt(c, lambda url: pytest.fail(f"fetched {url}")) is None

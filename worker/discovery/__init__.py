@@ -2,9 +2,11 @@
 
 Two phases, so snowballing only starts from companies the relevance screen confirmed:
   discover()       — (a) product search, (c) directories, (d) data vendors (marketplaces,
-                     collection services, published datasets)
-  snowball()       — (b) "alternatives to X" from explicit seeds + screened "yes" by-product holders
-  check_sources()  — confirm source pages, only for companies worth keeping (after screening)
+                     collection services, published datasets), (e) public sources (open
+                     corpora, public bodies that publish recordings)
+  snowball()       — (b) "alternatives to X" from explicit seeds + screened "yes" by-product
+                     holders, limited to competitors working in the buyer's languages
+  check_sources()  — confirm source pages before screening, which reads them too
 
 Run: uv run python -m worker.discovery [run_dir]   (needs spec.json + hypotheses.json; phase 1 only)
 """
@@ -42,7 +44,7 @@ class Discovery(BaseModel):
     partial: bool = False  # quota ran out before every channel call finished
 
 
-SCREENED_FIELDS = {"relevance", "relevance_reason", "holder_type", "data_owner", "contacts"}
+SCREENED_FIELDS = {"relevance", "relevance_reason", "holder_type", "data_owner", "languages", "contacts"}
 
 
 def merge(hits: list[Hit], previous: list[Candidate] = ()) -> list[Candidate]:
@@ -105,7 +107,7 @@ def _run_channels(tasks, progress: Progress) -> tuple[list[Hit], list[str], bool
 
 
 def discover(spec: DataSpec, hypotheses: list[HolderHypothesis], progress: Progress = print) -> Discovery:
-    """Phase 1: product search, directories and marketplaces, all calls in parallel."""
+    """Phase 1: product search, directories, data vendors and public sources, all calls in parallel."""
     tasks = [
         (f"(a) product search: {h.category}", lambda h=h: channels.product_search(h),
          {"channel": "product_search", "hypothesis": h.category})
@@ -117,6 +119,10 @@ def discover(spec: DataSpec, hypotheses: list[HolderHypothesis], progress: Progr
     ] + [
         (f"(d) data vendors: {angle}", lambda a=angle: channels.marketplace(spec, a), {"channel": "marketplace"})
         for angle in list(channels.MARKETPLACE_ANGLES)[: DISCOVERY["marketplace_calls"]]
+    ] + [
+        (f"(e) public sources: {angle}", lambda a=angle: channels.public_source(spec, a),
+         {"channel": "public_source"})
+        for angle in list(channels.PUBLIC_ANGLES)[: DISCOVERY["public_source_calls"]]
     ]
     hits, errors, partial = _run_channels(tasks, progress)
     return Discovery(hits=hits, candidates=merge(hits), errors=errors, partial=partial)
@@ -124,7 +130,7 @@ def discover(spec: DataSpec, hypotheses: list[HolderHypothesis], progress: Progr
 
 def pick_seeds(candidates: list[Candidate], explicit: list[tuple[str, str]] = ()) -> list[tuple[str, str]]:
     """Explicit seeds first, then screened "yes" companies of SNOWBALL_SEED_TYPES,
-    best-corroborated first."""
+    best-corroborated first. "yes" already implies evidence for the buyer's languages."""
     yes = sorted(
         (c for c in candidates if c.relevance == "yes" and c.holder_type in SNOWBALL_SEED_TYPES),
         key=Candidate.corroboration, reverse=True,
@@ -134,10 +140,13 @@ def pick_seeds(candidates: list[Candidate], explicit: list[tuple[str, str]] = ()
     return (list(explicit) + auto)[: DISCOVERY["snowball_seeds"]]
 
 
-def snowball(d: Discovery, seeds: list[tuple[str, str]], progress: Progress = print) -> Discovery:
-    """Phase 2: competitors of the seeds. Returns a new Discovery with everything merged."""
+def snowball(
+    d: Discovery, seeds: list[tuple[str, str]], languages: list[str] = (), progress: Progress = print
+) -> Discovery:
+    """Phase 2: competitors of the seeds that work in `languages` (any, if empty).
+    Returns a new Discovery with everything merged."""
     tasks = [
-        (f"(b) alternatives to {name}", lambda n=name, w=website: channels.snowball(n, w),
+        (f"(b) alternatives to {name}", lambda n=name, w=website: channels.snowball(n, w, languages),
          {"channel": "snowball", "seed": name})
         for name, website in seeds
     ]

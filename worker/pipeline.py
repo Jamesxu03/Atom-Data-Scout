@@ -1,5 +1,5 @@
-"""End-to-end: brief -> spec -> hypotheses -> discovery -> screen -> snowball -> screen
--> deep crawl + contacts. Independent calls run in parallel.
+"""End-to-end: brief -> spec -> hypotheses -> discovery -> source checks + screen -> snowball
+-> source checks + screen -> deep crawl + contacts. Independent calls run in parallel.
 
 If the Gemini quota runs out mid-run, everything gathered so far is saved and returned with
 partial=True instead of being lost.
@@ -87,14 +87,16 @@ def run(
     errors: list[str] = []
     partial = False
 
-    def screen_and_check(label: str) -> None:
-        """Screen unlabelled candidates, then confirm sources for the ones kept."""
+    def check_and_screen(label: str) -> None:
+        """Confirm sources, then screen unlabelled candidates. Sources come first because the
+        screen reads them too (resolved and cached by then), and so every row in the export
+        says whether its source was confirmed. Companies already screened "no" are skipped."""
         nonlocal d
-        with timer.step(label, f"{label}: {sum(c.relevance is None for c in d.candidates)} homepages"):
-            screen(spec, d.candidates, progress=progress)
-        runs.save(run_dir, "discovery", d)
         with timer.step("Source checks"):
-            d = check_sources(d, {c.domain for c in relevant(d.candidates)}, progress=progress)
+            d = check_sources(d, {c.domain for c in d.candidates if c.relevance != "no"}, progress=progress)
+        runs.save(run_dir, "discovery", d)
+        with timer.step(label, f"{label}: {sum(c.relevance is None for c in d.candidates)} companies"):
+            screen(spec, d.candidates, progress=progress)
         runs.save(run_dir, "discovery", d)
 
     try:
@@ -103,14 +105,14 @@ def run(
         runs.save(run_dir, "discovery", d)
         if d.partial:
             raise QuotaExceeded("quota ran out during discovery")
-        screen_and_check("Screen")
+        check_and_screen("Screen")
 
         seed_list = pick_seeds(d.candidates, explicit=list(seeds))
         if seed_list:
             with timer.step("Snowball searches", f"Snowballing from {len(seed_list)} relevant companies"):
-                d = snowball(d, seed_list, progress=progress)
+                d = snowball(d, seed_list, languages=spec.languages, progress=progress)
             runs.save(run_dir, "discovery", d)
-            screen_and_check("Screen new")  # only the snowball companies
+            check_and_screen("Screen new")  # only the snowball companies
             if d.partial:
                 raise QuotaExceeded("quota ran out during snowballing")
 
@@ -202,11 +204,11 @@ def contacts_csv(candidates: list[Candidate]) -> str:
 def candidates_csv(candidates: list[Candidate]) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["name", "domain", "website", "relevance", "holder_type", "data_owner", "reason",
-                "channels", "source_urls"])
+    w.writerow(["name", "domain", "website", "relevance", "holder_type", "data_owner", "languages", "reason",
+                "channels", "source_verified", "source_urls"])
     for c in candidates:
-        w.writerow([c.name, c.domain, c.website, c.relevance, c.holder_type, c.data_owner, c.relevance_reason,
-                    " ".join(c.channels), " ".join(c.source_urls)])
+        w.writerow([c.name, c.domain, c.website, c.relevance, c.holder_type, c.data_owner, ", ".join(c.languages),
+                    c.relevance_reason, " ".join(c.channels), c.source_verified, " ".join(c.source_urls)])
     return buf.getvalue()
 
 

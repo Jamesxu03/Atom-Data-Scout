@@ -19,6 +19,7 @@ DISCOVERY = {
     "snowball_seeds": 3,  # (b) one call per seed company
     "directory_hypotheses": 1,  # (c) one call per hypothesis; broad categories mostly add noise
     "marketplace_calls": 3,  # (d) one call per angle in channels.MARKETPLACE_ANGLES (max 3)
+    "public_source_calls": 2,  # (e) one call per angle in channels.PUBLIC_ANGLES (max 2)
     "companies_per_call": 10,
 }
 
@@ -26,9 +27,9 @@ DISCOVERY = {
 # drift into "alternatives to <hardware>" pages full of unrelated device makers.
 SNOWBALL_SEED_TYPES = ["by_product"]
 
-# Relevance screen: homepages per Flash call
+# Relevance screen: companies per Flash call
 SCREEN_BATCH_SIZE = 10
-SCREEN_TEXT_CHARS = 1500  # homepage text sent per company
+SCREEN_TEXT_CHARS = 1500  # text sent per page (homepage, and the source page if it's another page)
 
 # Only this many relevant candidates go to the deep crawl — keep low while testing
 MAX_PROFILED = 5

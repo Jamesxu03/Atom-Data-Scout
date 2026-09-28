@@ -24,6 +24,7 @@ LOGO = "assets/atom_logo.png"
 # Candidate tables, in the order they're shown (pipeline ranks vendors first too)
 HOLDER_GROUPS = [
     ("Data vendors", {"vendor"}),
+    ("Public corpora and archives", {"public"}),
     ("By-product holders", {"by_product"}),
     ("Technology and hardware", {"technology"}),
     ("Other", {"unrelated", None}),  # None: homepage unreachable, never screened by the model
@@ -150,6 +151,7 @@ with right:
                             "Company": c.name,
                             "Relevance": c.relevance,
                             "Data owner": c.data_owner,
+                            "Languages": ", ".join(c.languages),
                             "Reason": c.relevance_reason,
                             "Channels": ", ".join(c.channels),
                             "Website": c.website,
@@ -164,6 +166,9 @@ with right:
                 column_config={
                     "Data owner": st.column_config.TextColumn(
                         help="company: its own recordings; customers: needs their permission"
+                    ),
+                    "Languages": st.column_config.TextColumn(
+                        help="The brief's languages this company shows evidence of working in"
                     ),
                     "Website": st.column_config.LinkColumn(),
                     "Found on": st.column_config.LinkColumn(),
