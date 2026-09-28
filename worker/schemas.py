@@ -27,16 +27,46 @@ class HolderHypothesis(BaseModel):
 
     category: str
     rationale: str = Field(description="Why this kind of business would accumulate the data")
-    search_queries: list[str]
+    search_queries: list[str] = Field(
+        description="Product/service language the companies use about themselves, not dataset terms"
+    )
+
+
+Channel = Literal["product_search", "snowball", "directory", "marketplace"]
+Relevance = Literal["yes", "maybe", "no"]
+
+
+class Found(BaseModel):
+    """One company as reported by a discovery search (LLM output)."""
+
+    name: str
+    website: str = Field(description="The company's own homepage URL, not the page it was found on")
+    source_url: str = Field(description="URL of the page where this company was found")
+
+
+class FoundList(BaseModel):
+    companies: list[Found]
 
 
 class Candidate(BaseModel):
-    """A real company found by search."""
+    """A company found by discovery, merged across channels by domain."""
 
     name: str
     website: str
+    domain: str
+    channels: list[Channel]
     source_urls: list[str] = Field(description="Where this company was found")
-    hypothesis: str = Field(description="HolderHypothesis.category that led to it")
+    hypotheses: list[str] = Field(default=[], description="HolderHypothesis categories that led here")
+    # Filled by the relevance screen
+    relevance: Relevance | None = None
+    relevance_reason: str | None = None
+
+
+class Funnel(BaseModel):
+    found: int = 0  # raw hits across all channels
+    deduped: int = 0  # unique domains
+    relevant: int = 0  # screened yes or maybe
+    profiled: int = 0  # deep-crawled
 
 
 class CompanyProfile(BaseModel):

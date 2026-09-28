@@ -6,8 +6,22 @@ MODEL_FLASH = "gemini-3.8-flash"
 # MODEL_PRO = "gemini-3.1-pro-preview"
 MODEL_PRO = MODEL_FLASH
 
-# Each search costs money — keep low while testing, raise to 20 once the flow works
-MAX_CANDIDATES = 5
+# Discovery budget. Each unit below is one Gemini call with Google Search, so it costs money
+# (and the free tier allows ~20 calls/day in total). Raise once the flow works.
+DISCOVERY = {
+    "product_search_hypotheses": 5,  # (a) one call per hypothesis
+    "snowball_seeds": 3,  # (b) one call per seed company
+    "directory_hypotheses": 3,  # (c) one call per hypothesis
+    "marketplace_calls": 1,  # (d)
+    "companies_per_call": 10,
+}
+
+# Relevance screen: homepages per Flash call
+SCREEN_BATCH_SIZE = 10
+SCREEN_TEXT_CHARS = 1500  # homepage text sent per company
+
+# Only this many relevant candidates go to the deep crawl — keep low while testing
+MAX_PROFILED = 5
 
 # Weights must sum to 1.0
 SCORE_WEIGHTS = {
