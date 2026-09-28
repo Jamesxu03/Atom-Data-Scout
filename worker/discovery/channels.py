@@ -1,5 +1,7 @@
 """Discovery channels. Each is one Gemini call with Google Search returning companies + source URLs."""
 
+import httpx
+
 from worker import llm
 from worker.config import DISCOVERY, MODEL_FLASH
 from worker.schemas import DataSpec, Found, FoundList, HolderHypothesis
@@ -15,10 +17,27 @@ RULES = """Rules:
 """
 
 
+GROUNDING_REDIRECT = "vertexaisearch.cloud.google.com/grounding-api-redirect/"
+
+
+def resolve_source(url: str) -> str:
+    """Google Search grounding gives opaque, expiring redirect links; swap in the real page URL."""
+    if GROUNDING_REDIRECT not in url:
+        return url
+    try:
+        r = httpx.head(url, follow_redirects=False, timeout=10)
+        return r.headers.get("location") or url
+    except httpx.HTTPError:
+        return url
+
+
 def _search(prompt: str) -> list[Found]:
     n = DISCOVERY["companies_per_call"]
     result = llm.ask(prompt + "\n" + RULES.format(n=n), FoundList, model=MODEL_FLASH, use_search=True)
-    return result.companies[:n]
+    companies = result.companies[:n]
+    for f in companies:
+        f.source_url = resolve_source(f.source_url)
+    return companies
 
 
 def product_search(h: HolderHypothesis) -> list[Found]:

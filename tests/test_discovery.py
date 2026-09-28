@@ -85,3 +85,23 @@ def test_failed_channel_call_is_recorded_not_fatal(fake_ask):
     d = discover(SPEC, HYPS, progress=lambda _: None)
     assert d.candidates
     assert len(d.errors) == 1 and "marketplaces" in d.errors[0]
+
+
+def test_resolve_source_follows_grounding_redirect(monkeypatch):
+    import httpx
+
+    from worker.discovery.channels import resolve_source
+
+    class Resp:
+        headers = {"location": "https://real.example/page"}
+
+    monkeypatch.setattr(httpx, "head", lambda url, **kw: Resp())
+    redirect = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQ"
+    assert resolve_source(redirect) == "https://real.example/page"
+    assert resolve_source("https://plain.example/x") == "https://plain.example/x"  # untouched
+
+    def boom(url, **kw):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(httpx, "head", boom)
+    assert resolve_source(redirect) == redirect  # keep the redirect rather than lose the source
