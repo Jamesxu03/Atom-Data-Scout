@@ -23,6 +23,10 @@ SCREEN_TEXT_CHARS = 1500  # homepage text sent per company
 # Only this many relevant candidates go to the deep crawl — keep low while testing
 MAX_PROFILED = 5
 
+# Contacts step: one Gemini search call per profiled company (website contacts are free)
+FIND_CONTACTS = True
+CONTACTS_PER_COMPANY = 5
+
 # Weights must sum to 1.0
 SCORE_WEIGHTS = {
     "data_match": 0.25,

@@ -48,6 +48,21 @@ class FoundList(BaseModel):
     companies: list[Found]
 
 
+class Contact(BaseModel):
+    """A way to reach someone at the company. Business details that are published publicly only."""
+
+    name: str | None = Field(default=None, description="Person's name; null for a generic inbox")
+    role: str | None = Field(default=None, description="e.g. CEO, Head of Data, DPO, Administrator")
+    email: str | None = None
+    phone: str | None = None
+    linkedin_url: str | None = None
+    source_url: str = Field(description="Page where these details are published")
+    origin: Literal["website", "search"] = "search"
+    verified: bool = Field(
+        default=False, description="Email/phone (or name) found verbatim on source_url when we fetched it"
+    )
+
+
 class Candidate(BaseModel):
     """A company found by discovery, merged across channels by domain."""
 
@@ -60,6 +75,8 @@ class Candidate(BaseModel):
     # Filled by the relevance screen
     relevance: Relevance | None = None
     relevance_reason: str | None = None
+    # Filled by the contacts step (profiled companies only)
+    contacts: list[Contact] = []
 
 
 class Funnel(BaseModel):
@@ -67,6 +84,7 @@ class Funnel(BaseModel):
     deduped: int = 0  # unique domains
     relevant: int = 0  # screened yes or maybe
     profiled: int = 0  # deep-crawled
+    with_contacts: int = 0  # profiled companies with at least one verified contact
 
 
 class CompanyProfile(BaseModel):
@@ -113,3 +131,4 @@ class Result(BaseModel):
     profile: CompanyProfile
     score: Score
     email_draft: str
+    contacts: list[Contact] = []

@@ -21,6 +21,7 @@ MIN_TEXT_CHARS = 200  # less than this = probably a JS shell, try playwright
 LINK_PATTERNS = {
     "privacy": re.compile(r"privacy|data[-_ ]?protection|gdpr", re.I),
     "terms": re.compile(r"terms|conditions|\btos\b|legal", re.I),
+    "contact": re.compile(r"contact|get[-_ ]in[-_ ]touch", re.I),
 }
 
 
@@ -34,7 +35,11 @@ class CrawlResult(BaseModel):
     homepage: Page | None = None
     privacy: Page | None = None
     terms: Page | None = None
+    contact: Page | None = None
     errors: list[str] = []
+
+    def pages(self) -> list[Page]:
+        return [p for p in (self.homepage, self.privacy, self.terms, self.contact) if p]
 
 
 def _cache_path(url: str) -> Path:
@@ -81,21 +86,25 @@ def fetch_html(url: str) -> str:
     return html
 
 
+def fetch_html_quick(url: str) -> str:
+    """Cached httpx fetch with no browser fallback — for cheap checks. Raises on failure."""
+    if not url.startswith("http"):
+        url = "https://" + url
+    path = _cache_path(url)
+    if path.exists():
+        return path.read_text(encoding="utf-8", errors="ignore")
+    html = _fetch_httpx(url)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html, encoding="utf-8")
+    return html
+
+
 def fetch_homepage_text(website: str) -> str:
     """Cheap homepage fetch for screening: httpx only (no browser), cached. Raises on failure.
 
     Falls back to <title> + meta description when there's no main text (JS-heavy sites).
     """
-    if not website.startswith("http"):
-        website = "https://" + website
-    path = _cache_path(website)
-    if path.exists():
-        html = path.read_text(encoding="utf-8", errors="ignore")
-    else:
-        html = _fetch_httpx(website)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(html, encoding="utf-8")
-
+    html = fetch_html_quick(website)
     text = trafilatura.extract(html) or ""
     if len(text) < MIN_TEXT_CHARS:
         title = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
@@ -145,7 +154,7 @@ def crawl(website: str) -> CrawlResult:
         result.errors.append(f"homepage: {type(e).__name__}: {e}")
         return result
 
-    for kind in ("privacy", "terms"):
+    for kind in ("privacy", "terms", "contact"):
         link = _find_link(home_html, website, kind)
         if not link:
             result.errors.append(f"{kind}: no link found on homepage")

@@ -41,11 +41,12 @@ with right:
         st.info("Enter a brief and click Start search.")
     else:
         f = output.funnel
-        cols = st.columns(4)
+        cols = st.columns(5)
         cols[0].metric("Found", f.found, help="Raw hits across all discovery channels")
         cols[1].metric("After dedupe", f.deduped, help="Unique domains")
         cols[2].metric("Relevant", f.relevant, help="Homepage screen said yes or maybe")
-        cols[3].metric("Profiled", f.profiled, help="Deep-crawled (homepage, privacy, terms)")
+        cols[3].metric("Profiled", f.profiled, help="Deep-crawled (homepage, privacy, terms, contact)")
+        cols[4].metric("With contacts", f.with_contacts, help="Profiled companies with a verified contact")
 
         st.subheader("Candidates")
         labels = st.multiselect("Relevance", ["yes", "maybe", "no"], default=["yes", "maybe"])
@@ -78,6 +79,43 @@ with right:
             "candidates.csv",
             "text/csv",
         )
+
+        with_contacts = [c for c in output.candidates if c.contacts]
+        if with_contacts:
+            st.subheader("Contacts")
+            only_verified = st.toggle("Verified only", value=False,
+                                      help="Email/phone/name found on the source page when we checked it")
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Company": c.name,
+                            "Name": k.name,
+                            "Role": k.role,
+                            "Email": k.email,
+                            "Phone": k.phone,
+                            "Verified": k.verified,
+                            "From": k.origin,
+                            "Source": k.source_url,
+                        }
+                        for c in with_contacts
+                        for k in c.contacts
+                        if k.verified or not only_verified
+                    ]
+                ),
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Source": st.column_config.LinkColumn(),
+                    "Verified": st.column_config.CheckboxColumn(),
+                },
+            )
+            st.download_button(
+                "Download contacts CSV",
+                pipeline.contacts_csv(output.candidates),
+                "contacts.csv",
+                "text/csv",
+            )
 
         results = output.results
         if not results:
@@ -125,6 +163,13 @@ with right:
                     st.markdown(f"- **{label}:** {'unknown' if value is None else value}")
                     for ev in evidence:
                         st.markdown(f"  > {ev.quote}  \n  [{ev.url}]({ev.url})")
+                if r.contacts:
+                    st.markdown("**Contacts**")
+                    for k in r.contacts:
+                        who = " — ".join(x for x in (k.name, k.role) if x) or "Contact"
+                        how = " · ".join(x for x in (k.email, k.phone) if x) or "no email/phone published"
+                        check = "✅ verified" if k.verified else "⚠️ unverified"
+                        st.markdown(f"- **{who}**: {how} ({check}, [source]({k.source_url}))")
                 st.markdown("**Score reasons**")
                 for dim, reason in s.reasons.items():
                     st.markdown(f"- {dim}: {getattr(s, dim)} — {reason}")

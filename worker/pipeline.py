@@ -11,12 +11,14 @@ from collections.abc import Callable
 from pydantic import BaseModel
 
 from worker import runs
-from worker.config import MAX_PROFILED
+from worker.config import FIND_CONTACTS, MAX_PROFILED
 from worker.crawl import CrawlResult, crawl
 from worker.demo import demo_candidates, demo_results
 from worker.discovery import discover
+from worker.llm import QuotaExceeded
 from worker.schemas import Candidate, Funnel, Result
 from worker.scoring import compute_total
+from worker.steps.contacts import find_contacts
 from worker.steps.hypotheses import HypothesisList, hypotheses
 from worker.steps.parse_brief import parse_brief
 from worker.steps.screen import relevant, screen
@@ -65,13 +67,25 @@ def run(
     crawls = []
     for c in keep[:MAX_PROFILED]:
         progress(f"Deep crawl: {c.domain}")
-        crawls.append(crawler(c.website))
+        cr = crawler(c.website)
+        crawls.append(cr)
+        if not cr.homepage:
+            continue
+        progress(f"Finding contacts: {c.domain}")
+        try:
+            c.contacts = find_contacts(c, cr, use_search=FIND_CONTACTS)
+        except QuotaExceeded:
+            raise
+        except Exception as e:  # keep the run going; the crawl result is still useful
+            cr.errors.append(f"contacts: {type(e).__name__}: {str(e)[:200]}")
+    runs.save(run_dir, "discovery", d)
 
     funnel = Funnel(
         found=len(d.hits),
         deduped=len(d.candidates),
         relevant=len(keep),
         profiled=sum(1 for cr in crawls if cr.homepage),
+        with_contacts=sum(1 for c in d.candidates if any(k.verified for k in c.contacts)),
     )
     out = RunOutput(funnel=funnel, candidates=d.candidates, crawls=crawls, run_dir=str(run_dir))
     runs.save(run_dir, "output", out)
@@ -80,7 +94,8 @@ def run(
 
 def _demo_run(progress: Progress) -> RunOutput:
     for step in ["Analysing brief", "Guessing who holds this data",
-                 "Discovering candidate companies", "Screening homepages", "Deep crawl"]:
+                 "Discovering candidate companies", "Screening homepages", "Deep crawl",
+                 "Finding contacts"]:
         progress(step)
         time.sleep(0.3)
     results = demo_results()
@@ -91,7 +106,8 @@ def _demo_run(progress: Progress) -> RunOutput:
     keep = relevant(candidates)
     return RunOutput(
         funnel=Funnel(found=len(candidates) + 4, deduped=len(candidates),
-                      relevant=len(keep), profiled=len(results)),
+                      relevant=len(keep), profiled=len(results),
+                      with_contacts=sum(1 for c in candidates if any(k.verified for k in c.contacts))),
         candidates=candidates,
         results=results,
     )
@@ -112,6 +128,18 @@ def to_csv(results: list[Result]) -> str:
             s.seller_motivation, s.contactability, p.company_status, p.company_number,
             p.records_data, p.retention, p.policy_allows_transfer, p.policy_allows_training,
         ])
+    return buf.getvalue()
+
+
+def contacts_csv(candidates: list[Candidate]) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["company", "domain", "name", "role", "email", "phone", "linkedin_url",
+                "source_url", "origin", "verified"])
+    for c in candidates:
+        for k in c.contacts:
+            w.writerow([c.name, c.domain, k.name, k.role, k.email, k.phone, k.linkedin_url,
+                        k.source_url, k.origin, k.verified])
     return buf.getvalue()
 
 

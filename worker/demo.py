@@ -1,10 +1,36 @@
 """Fake results so the UI can be built and tested without any API keys. All companies are fictional."""
 
-from worker.schemas import Candidate, CompanyProfile, Evidence, Result, Score
+from worker.schemas import Candidate, CompanyProfile, Contact, Evidence, Result, Score
 
 
 def _ev(quote: str, url: str) -> list[Evidence]:
     return [Evidence(quote=quote, url=url)]
+
+
+# Fictional people; phone numbers are from Ofcom's 020 7946 0xxx range reserved for drama
+DEMO_CONTACTS = {
+    "examplecall.example": [
+        ("Alex Example", "Co-founder & CEO", "alex@examplecall.example", None, "search", True),
+        ("Jordan Sample", "Joint Administrator (Example Insolvency LLP)", "jordan.sample@exampleinsolvency.example", "+44 20 7946 0123", "search", True),
+        (None, "Privacy / DPO inbox", "privacy@examplecall.example", None, "website", True),
+    ],
+    "sampletranscribe.example": [
+        ("Sam Placeholder", "Head of Data Partnerships", None, None, "search", False),
+        (None, "General inbox", "hello@sampletranscribe.example", "+44 20 7946 0456", "website", True),
+    ],
+    "demomeetings.example": [
+        ("Riley Mock", "Chief Technology Officer", "riley@demomeetings.example", None, "search", True),
+        (None, "Sales / partnerships inbox", "partnerships@demomeetings.example", None, "website", True),
+    ],
+}
+
+
+def _demo_contacts(domain: str) -> list[Contact]:
+    return [
+        Contact(name=name, role=role, email=email, phone=phone, origin=origin, verified=verified,
+                source_url=f"https://{domain}/{'contact' if origin == 'website' else 'about/team'}")
+        for name, role, email, phone, origin, verified in DEMO_CONTACTS.get(domain, [])
+    ]
 
 
 def demo_results() -> list[Result]:
@@ -50,14 +76,16 @@ def demo_results() -> list[Result]:
             **dict(zip(dims, pts)),
             reasons={d: f"(demo) reason for {d.replace('_', ' ')}" for d in dims},
         )
+        contacts = _demo_contacts(site.removeprefix("https://"))
+        greeting = next((k.name.split()[0] for k in contacts if k.name), f"{name} team")
         email = (
             f"Subject: Enquiry about licensing meeting audio data\n\n"
-            f"Dear {name} team,\n\n"
+            f"Dear {greeting},\n\n"
             f"We are looking to licence multi-speaker English meeting audio with transcripts for "
             f"model training. Given your work in this area, we'd welcome a short call to discuss "
             f"whether a data licence could be of interest.\n\nBest regards,\n[Your name]"
         )
-        results.append(Result(profile=profile, score=score, email_draft=email))
+        results.append(Result(profile=profile, score=score, email_draft=email, contacts=contacts))
     return results
 
 
@@ -75,6 +103,7 @@ def demo_candidates() -> list[Candidate]:
         Candidate(
             name=name, website=f"https://{domain}", domain=domain, channels=channels,
             source_urls=[f"https://search.example/{domain}"], relevance=label, relevance_reason=reason,
+            contacts=_demo_contacts(domain),
         )
         for name, domain, channels, label, reason in rows
     ]
