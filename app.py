@@ -28,18 +28,63 @@ with left:
 if go:
     with left, st.status("Running pipeline…", expanded=True) as status:
         try:
-            st.session_state.results = pipeline.run(brief, demo=demo, progress=st.write)
+            st.session_state.output = pipeline.run(brief, demo=demo, progress=st.write)
             status.update(label="Done", state="complete")
         except Exception as e:
             status.update(label="Failed", state="error")
             st.error(f"{type(e).__name__}: {e}")
 
-results = st.session_state.get("results")
+output = st.session_state.get("output")
 
 with right:
-    if not results:
+    if not output:
         st.info("Enter a brief and click Start search.")
     else:
+        f = output.funnel
+        cols = st.columns(4)
+        cols[0].metric("Found", f.found, help="Raw hits across all discovery channels")
+        cols[1].metric("After dedupe", f.deduped, help="Unique domains")
+        cols[2].metric("Relevant", f.relevant, help="Homepage screen said yes or maybe")
+        cols[3].metric("Profiled", f.profiled, help="Deep-crawled (homepage, privacy, terms)")
+
+        st.subheader("Candidates")
+        labels = st.multiselect("Relevance", ["yes", "maybe", "no"], default=["yes", "maybe"])
+        shown = [c for c in output.candidates if c.relevance in labels]
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Company": c.name,
+                        "Relevance": c.relevance,
+                        "Reason": c.relevance_reason,
+                        "Channels": ", ".join(c.channels),
+                        "Website": c.website,
+                        "Found on": c.source_urls[0] if c.source_urls else None,
+                    }
+                    for c in shown
+                ],
+                columns=["Company", "Relevance", "Reason", "Channels", "Website", "Found on"],
+            ),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Website": st.column_config.LinkColumn(),
+                "Found on": st.column_config.LinkColumn(),
+            },
+        )
+        st.download_button(
+            "Download candidates CSV",
+            pipeline.candidates_csv(output.candidates),
+            "candidates.csv",
+            "text/csv",
+        )
+
+        results = output.results
+        if not results:
+            st.caption("Profile extraction and scoring aren't wired into live runs yet.")
+            st.stop()
+
+        st.subheader("Ranked profiles")
         table = pd.DataFrame(
             [
                 {
@@ -59,7 +104,7 @@ with right:
             column_config={"Website": st.column_config.LinkColumn()},
         )
         st.download_button(
-            "Download CSV", pipeline.to_csv(results), "results.csv", "text/csv"
+            "Download results CSV", pipeline.to_csv(results), "results.csv", "text/csv"
         )
 
         for r in results:

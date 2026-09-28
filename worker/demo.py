@@ -1,6 +1,6 @@
 """Fake results so the UI can be built and tested without any API keys. All companies are fictional."""
 
-from worker.schemas import CompanyProfile, Evidence, Result, Score
+from worker.schemas import Candidate, CompanyProfile, Evidence, Result, Score
 
 
 def _ev(quote: str, url: str) -> list[Evidence]:
@@ -59,3 +59,22 @@ def demo_results() -> list[Result]:
         )
         results.append(Result(profile=profile, score=score, email_draft=email))
     return results
+
+
+def demo_candidates() -> list[Candidate]:
+    rows = [
+        ("Examplecall Ltd", "examplecall.example", ["product_search", "directory"], "yes", "AI notetaker that records and transcribes meetings"),
+        ("Sample Transcribe plc", "sampletranscribe.example", ["product_search", "snowball"], "yes", "Transcription service for recorded business calls"),
+        ("Demo Meetings Co", "demomeetings.example", ["snowball"], "yes", "Video conferencing with cloud recording"),
+        ("Placeholder Voice", "placeholdervoice.example", ["marketplace"], "maybe", "Lists speech datasets; unclear if meeting audio"),
+        ("Mock CRM Inc", "mockcrm.example", ["directory"], "maybe", "Sales CRM with an optional call-recording add-on"),
+        ("Fictional HR", "fictionalhr.example", ["product_search"], "no", "HR payroll software; no audio"),
+        ("Invented Ads", "inventedads.example", ["directory"], "no", "Ad network; unrelated"),
+    ]
+    return [
+        Candidate(
+            name=name, website=f"https://{domain}", domain=domain, channels=channels,
+            source_urls=[f"https://search.example/{domain}"], relevance=label, relevance_reason=reason,
+        )
+        for name, domain, channels, label, reason in rows
+    ]

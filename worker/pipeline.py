@@ -1,39 +1,100 @@
-"""End-to-end: brief -> spec -> hypotheses -> candidates -> crawl -> profile -> score -> ranked results."""
+"""End-to-end: brief -> spec -> hypotheses -> discovery -> relevance screen -> deep crawl.
+
+Profile extraction and scoring aren't wired into live runs yet; demo mode shows the full output.
+"""
 
 import csv
 import io
 import time
 from collections.abc import Callable
 
-from worker.demo import demo_results
-from worker.schemas import Result
+from pydantic import BaseModel
+
+from worker import runs
+from worker.config import MAX_PROFILED
+from worker.crawl import CrawlResult, crawl
+from worker.demo import demo_candidates, demo_results
+from worker.discovery import discover
+from worker.schemas import Candidate, Funnel, Result
 from worker.scoring import compute_total
+from worker.steps.hypotheses import HypothesisList, hypotheses
+from worker.steps.parse_brief import parse_brief
+from worker.steps.screen import relevant, screen
 
 Progress = Callable[[str], None]
 
-STEPS = [
-    "Analysing brief",
-    "Guessing who holds this data",
-    "Searching for candidate companies",
-    "Crawling websites and privacy policies",
-    "Extracting company profiles",
-    "Scoring and drafting emails",
-]
+
+class RunOutput(BaseModel):
+    funnel: Funnel
+    candidates: list[Candidate]  # every deduped candidate, with relevance labels
+    crawls: list[CrawlResult] = []
+    results: list[Result] = []  # scored profiles (demo only for now)
+    run_dir: str | None = None
 
 
-def run(brief: str, demo: bool = False, progress: Progress = print) -> list[Result]:
-    if not demo:
-        # Steps 3–8 need Gemini / Companies House keys; wire them in here as they're built.
-        raise NotImplementedError("Live pipeline not built yet — run with demo=True.")
+def run(
+    brief: str,
+    demo: bool = False,
+    progress: Progress = print,
+    seeds: list[tuple[str, str]] = (),
+    crawler: Callable[[str], CrawlResult] = crawl,
+) -> RunOutput:
+    if demo:
+        return _demo_run(progress)
 
-    for step in STEPS:
+    run_dir = runs.new_run()
+    (run_dir / "brief.txt").write_text(brief, encoding="utf-8")
+
+    progress("Analysing brief")
+    spec = parse_brief(brief)
+    runs.save(run_dir, "spec", spec)
+
+    progress("Guessing who holds this data")
+    hyps = HypothesisList(hypotheses=hypotheses(spec))
+    runs.save(run_dir, "hypotheses", hyps)
+
+    progress("Discovering candidate companies")
+    d = discover(spec, hyps.hypotheses, seeds=seeds, progress=progress)
+    runs.save(run_dir, "discovery", d)
+
+    progress(f"Screening {len(d.candidates)} homepages for relevance")
+    screen(spec, d.candidates, progress=progress)
+    runs.save(run_dir, "discovery", d)
+    keep = relevant(d.candidates)
+
+    crawls = []
+    for c in keep[:MAX_PROFILED]:
+        progress(f"Deep crawl: {c.domain}")
+        crawls.append(crawler(c.website))
+
+    funnel = Funnel(
+        found=len(d.hits),
+        deduped=len(d.candidates),
+        relevant=len(keep),
+        profiled=sum(1 for cr in crawls if cr.homepage),
+    )
+    out = RunOutput(funnel=funnel, candidates=d.candidates, crawls=crawls, run_dir=str(run_dir))
+    runs.save(run_dir, "output", out)
+    return out
+
+
+def _demo_run(progress: Progress) -> RunOutput:
+    for step in ["Analysing brief", "Guessing who holds this data",
+                 "Discovering candidate companies", "Screening homepages", "Deep crawl"]:
         progress(step)
-        time.sleep(0.4)
+        time.sleep(0.3)
     results = demo_results()
-
     for r in results:
         r.score.total = compute_total(r.score)
-    return sorted(results, key=lambda r: r.score.total, reverse=True)
+    results.sort(key=lambda r: r.score.total, reverse=True)
+    candidates = demo_candidates()
+    keep = relevant(candidates)
+    return RunOutput(
+        funnel=Funnel(found=len(candidates) + 4, deduped=len(candidates),
+                      relevant=len(keep), profiled=len(results)),
+        candidates=candidates,
+        results=results,
+    )
 
 
 def to_csv(results: list[Result]) -> str:
@@ -54,6 +115,20 @@ def to_csv(results: list[Result]) -> str:
     return buf.getvalue()
 
 
+def candidates_csv(candidates: list[Candidate]) -> str:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["name", "domain", "website", "relevance", "reason", "channels", "source_urls"])
+    for c in candidates:
+        w.writerow([c.name, c.domain, c.website, c.relevance, c.relevance_reason,
+                    " ".join(c.channels), " ".join(c.source_urls)])
+    return buf.getvalue()
+
+
 if __name__ == "__main__":
-    for r in run("demo brief", demo=True):
-        print(f"{r.score.total:>5}  {r.profile.name}  ({r.profile.company_status})")
+    import sys
+
+    out = run(" ".join(sys.argv[1:]) or "demo", demo=len(sys.argv) < 2)
+    print(out.funnel)
+    for c in relevant(out.candidates):
+        print(f"  {c.relevance:5} {c.domain:30} {','.join(c.channels)}")

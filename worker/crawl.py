@@ -81,6 +81,33 @@ def fetch_html(url: str) -> str:
     return html
 
 
+def fetch_homepage_text(website: str) -> str:
+    """Cheap homepage fetch for screening: httpx only (no browser), cached. Raises on failure.
+
+    Falls back to <title> + meta description when there's no main text (JS-heavy sites).
+    """
+    if not website.startswith("http"):
+        website = "https://" + website
+    path = _cache_path(website)
+    if path.exists():
+        html = path.read_text(encoding="utf-8", errors="ignore")
+    else:
+        html = _fetch_httpx(website)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(html, encoding="utf-8")
+
+    text = trafilatura.extract(html) or ""
+    if len(text) < MIN_TEXT_CHARS:
+        title = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+        desc = re.search(
+            r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)', html, re.I
+        )
+        text = " ".join(m.group(1).strip() for m in (title, desc) if m) + "\n" + text
+    if not text.strip():
+        raise ValueError("no text on homepage")
+    return text.strip()
+
+
 def _find_link(html: str, base_url: str, kind: str) -> str | None:
     pattern = LINK_PATTERNS[kind]
     base_host = urlparse(base_url).netloc
