@@ -25,5 +25,5 @@ uv run playwright install chromium    # headless browser for crawling
 cp .env.example .env                  # then fill in your API keys
 ```
 
-Run things with `uv run`, e.g. `uv run streamlit run worker/app.py`.
+Run things with `uv run`, e.g. `uv run streamlit run app.py`.
 Add a dependency with `uv add <package>`.
