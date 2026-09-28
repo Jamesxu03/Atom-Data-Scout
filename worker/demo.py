@@ -66,7 +66,9 @@ def demo_results() -> list[Result]:
             policy_allows_training_evidence=_ev(
                 "We may use de-identified data to improve our models.", privacy
             ),
-            company_number=number,
+            country="GB",
+            registry="Companies House",
+            registration_number=number,
             company_status=status,
             incorporated_on="2017-03-01",
             registered_address="1 Example Street, London",
@@ -103,7 +105,7 @@ def demo_candidates() -> list[Candidate]:
         Candidate(
             name=name, website=f"https://{domain}", domain=domain, channels=channels,
             source_urls=[f"https://search.example/{domain}"], relevance=label, relevance_reason=reason,
-            contacts=_demo_contacts(domain),
+            contacts=_demo_contacts(domain), source_verified=label != "no",
         )
         for name, domain, channels, label, reason in rows
     ]

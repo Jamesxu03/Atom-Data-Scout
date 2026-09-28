@@ -107,10 +107,13 @@ class CompanyProfile(BaseModel):
         description="Does the policy permit use for AI/model training?"
     )
     policy_allows_training_evidence: list[Evidence]
-    # Filled from Companies House, not by Gemini
-    company_number: str | None = None
+    # Company registry details, filled by a per-country registry source (not by Gemini).
+    # Low priority: no registry source is wired in yet.
+    country: str | None = Field(default=None, description="ISO 3166-1 alpha-2, e.g. GB, US, DE")
+    registry: str | None = Field(default=None, description="e.g. Companies House, OpenCorporates")
+    registration_number: str | None = None
     company_status: str | None = Field(
-        default=None, description="active / administration / liquidation / dissolved ..."
+        default=None, description="As the registry reports it: active, dissolved, in liquidation..."
     )
     incorporated_on: str | None = None
     registered_address: str | None = None

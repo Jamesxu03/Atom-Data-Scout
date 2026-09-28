@@ -165,14 +165,14 @@ def to_csv(results: list[Result]) -> str:
     w = csv.writer(buf)
     w.writerow([
         "rank", "name", "website", "total", "data_match", "estimated_volume", "rights_clarity",
-        "seller_motivation", "contactability", "company_status", "company_number",
+        "seller_motivation", "contactability", "company_status", "country", "registration_number",
         "records_data", "retention", "policy_allows_transfer", "policy_allows_training",
     ])
     for i, r in enumerate(results, 1):
         p, s = r.profile, r.score
         w.writerow([
             i, p.name, p.website, s.total, s.data_match, s.estimated_volume, s.rights_clarity,
-            s.seller_motivation, s.contactability, p.company_status, p.company_number,
+            s.seller_motivation, s.contactability, p.company_status, p.country, p.registration_number,
             p.records_data, p.retention, p.policy_allows_transfer, p.policy_allows_training,
         ])
     return buf.getvalue()

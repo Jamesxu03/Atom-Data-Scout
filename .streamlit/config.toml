@@ -1,5 +1,9 @@
 [theme]
 primaryColor = "#FF5A6A"
 
+[client]
+# Internal tool: no Deploy button / Streamlit Community Cloud menu, no developer options
+toolbarMode = "minimal"
+
 [browser]
 gatherUsageStats = false

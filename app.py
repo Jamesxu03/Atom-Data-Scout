@@ -1,4 +1,12 @@
-"""Streamlit UI. Run: uv run streamlit run app.py"""
+"""Streamlit UI. Run: uv run streamlit run app.py
+
+The pipeline runs in a background thread, so touching the page while it runs doesn't
+restart or interrupt it; a fragment polls for progress once a second.
+"""
+
+import threading
+import time
+from dataclasses import dataclass, field
 
 import pandas as pd
 import streamlit as st
@@ -13,33 +21,96 @@ EXAMPLE_BRIEF = (
 
 LOGO = "assets/atom_logo.png"
 
+
+@dataclass
+class Job:
+    messages: list[str] = field(default_factory=list)
+    output: pipeline.RunOutput | None = None
+    error: str | None = None
+    done: bool = False
+    started: float = field(default_factory=time.time)
+    finished: float | None = None
+
+    @property
+    def elapsed(self) -> int:
+        return int((self.finished or time.time()) - self.started)
+
+
+def start_job() -> None:
+    if (job := st.session_state.get("job")) and not job.done:
+        return  # already running
+    job = Job()
+    brief, demo = st.session_state.brief, st.session_state.demo
+
+    def work():
+        try:
+            job.output = pipeline.run(brief, demo=demo, progress=job.messages.append)
+        except Exception as e:
+            job.error = f"{type(e).__name__}: {e}"
+        finally:
+            job.finished = time.time()
+            job.done = True
+
+    threading.Thread(target=work, daemon=True).start()
+    st.session_state.job = job
+
+
 st.set_page_config(page_title="Atom Data Scout", page_icon=LOGO, layout="wide")
 st.logo(LOGO, size="large")
 st.image(LOGO, width=180)
 st.title("Data Scout")
 
+job: Job | None = st.session_state.get("job")
+running = job is not None and not job.done
+
 left, right = st.columns([1, 2])
 
 with left:
-    brief = st.text_area("Data brief", EXAMPLE_BRIEF, height=180)
-    demo = st.toggle("Demo mode (fake data, no API calls)", value=True)
-    go = st.button("Start search", type="primary", disabled=not brief.strip())
+    st.text_area("Data brief", EXAMPLE_BRIEF, height=180, key="brief")
+    st.toggle("Demo mode (fake data, no API calls)", value=True, key="demo")
+    st.button(
+        "Running…" if running else "Start search",
+        type="primary",
+        on_click=start_job,
+        disabled=running or not st.session_state.brief.strip(),
+    )
 
-if go:
-    with left, st.status("Running pipeline…", expanded=True) as status:
-        try:
-            st.session_state.output = pipeline.run(brief, demo=demo, progress=st.write)
-            status.update(label="Done", state="complete")
-        except Exception as e:
-            status.update(label="Failed", state="error")
-            st.error(f"{type(e).__name__}: {e}")
+    @st.fragment(run_every=1 if running else None)
+    def progress_panel():
+        job: Job | None = st.session_state.get("job")
+        if job is None:
+            return
+        if not job.done:
+            with st.status(f"Running… {job.elapsed}s", expanded=True):
+                for m in job.messages[-12:]:
+                    st.write(m)
+            return
+        if st.session_state.get("rendered_job") is not job:
+            st.session_state.rendered_job = job
+            st.rerun()  # full rerun so the results column picks up the new output
+        if job.error:
+            st.error(f"Failed after {job.elapsed}s — {job.error}")
+        else:
+            with st.status(f"Done in {job.elapsed}s", state="complete", expanded=False):
+                for m in job.messages:
+                    st.write(m)
 
-output = st.session_state.get("output")
+    progress_panel()
+
+output = job.output if job and job.done else st.session_state.get("last_output")
+if job and job.done and job.output:
+    st.session_state.last_output = job.output
 
 with right:
     if not output:
-        st.info("Enter a brief and click Start search.")
+        st.info("Running — results appear here when done." if running else "Enter a brief and click Start search.")
     else:
+        if output.partial:
+            st.warning("The Gemini quota ran out part-way, so these results are incomplete.")
+        if output.errors:
+            with st.expander(f"{len(output.errors)} problems during the run"):
+                for e in output.errors:
+                    st.text(e)
         f = output.funnel
         cols = st.columns(5)
         cols[0].metric("Found", f.found, help="Raw hits across all discovery channels")
@@ -61,16 +132,21 @@ with right:
                         "Channels": ", ".join(c.channels),
                         "Website": c.website,
                         "Found on": c.source_urls[0] if c.source_urls else None,
+                        "Source checked": c.source_verified,
                     }
                     for c in shown
                 ],
-                columns=["Company", "Relevance", "Reason", "Channels", "Website", "Found on"],
+                columns=["Company", "Relevance", "Reason", "Channels", "Website", "Found on",
+                         "Source checked"],
             ),
             hide_index=True,
             width="stretch",
             column_config={
                 "Website": st.column_config.LinkColumn(),
                 "Found on": st.column_config.LinkColumn(),
+                "Source checked": st.column_config.CheckboxColumn(
+                    help="The source page was confirmed to list this company"
+                ),
             },
         )
         st.download_button(
@@ -149,7 +225,8 @@ with right:
             p, s = r.profile, r.score
             with st.expander(f"{p.name} — {s.total}"):
                 st.markdown(
-                    f"**Companies House:** {p.company_number or '—'} · {p.company_status or '—'} · "
+                    f"**Registry:** {p.registry or '—'} ({p.country or '—'}) · "
+                    f"{p.registration_number or '—'} · {p.company_status or '—'} · "
                     f"incorporated {p.incorporated_on or '—'} · {p.registered_address or '—'}"
                 )
                 claims = [
