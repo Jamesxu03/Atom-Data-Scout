@@ -2,7 +2,7 @@
 
 # Cheap bulk work (profile extraction) vs. reasoning work (hypotheses, scoring)
 MODEL_FLASH = "gemini-3.8-flash"
-MODEL_PRO = "gemini-3.1-pro-preview"  # needs billing: free tier has 0 Pro quota
+MODEL_PRO = MODEL_FLASH  # Flash for everything for now; Pro option: "gemini-3.1-pro-preview"
 
 # Discovery budget. Each unit below is one Gemini call with Google Search, so it costs money
 # (and the free tier allows ~20 calls/day in total). Raise once the flow works.
