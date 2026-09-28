@@ -2,7 +2,9 @@
 
 # Cheap bulk work (profile extraction) vs. reasoning work (hypotheses, scoring)
 MODEL_FLASH = "gemini-3.8-flash"
-MODEL_PRO = "gemini-3.1-pro-preview"
+# Free tier has 0 quota for Pro — using Flash until billing is on. Then restore:
+# MODEL_PRO = "gemini-3.1-pro-preview"
+MODEL_PRO = MODEL_FLASH
 
 # Each search costs money — keep low while testing, raise to 20 once the flow works
 MAX_CANDIDATES = 5
