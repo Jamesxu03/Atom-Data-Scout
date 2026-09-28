@@ -1,8 +1,8 @@
+from tests.test_hypotheses import SPEC
 from worker.config import DISCOVERY
 from worker.discovery import Hit, discover, merge
 from worker.discovery.domains import normalize_domain
 from worker.schemas import Found, FoundList, HolderHypothesis
-from tests.test_hypotheses import SPEC
 
 HYPS = [
     HolderHypothesis(category=f"cat {i}", rationale="r", search_queries=[f"query {i}"])

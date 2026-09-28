@@ -1,7 +1,7 @@
+from tests.test_hypotheses import SPEC
 from worker.config import SCREEN_BATCH_SIZE
 from worker.schemas import Candidate
 from worker.steps.screen import ScreenBatch, ScreenItem, relevant, screen
-from tests.test_hypotheses import SPEC
 
 
 def _cand(domain):

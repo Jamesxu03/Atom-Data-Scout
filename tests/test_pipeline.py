@@ -1,14 +1,13 @@
 """Full live-mode run with fake Gemini, fake homepages and a fake crawler."""
 
-from worker import pipeline, runs
-from worker.crawl import CrawlResult, Page
-from worker.schemas import FoundList
-from worker.steps.hypotheses import HypothesisList
-from worker.steps.screen import ScreenBatch
-from worker.schemas import DataSpec
 from tests.test_discovery import HYPS, _router
 from tests.test_hypotheses import SPEC
 from tests.test_screen import _label_by_prefix
+from worker import pipeline, runs
+from worker.crawl import CrawlResult, Page
+from worker.schemas import DataSpec, FoundList
+from worker.steps.hypotheses import HypothesisList
+from worker.steps.screen import ScreenBatch
 
 
 def test_live_run_funnel(fake_ask, monkeypatch, tmp_path):
