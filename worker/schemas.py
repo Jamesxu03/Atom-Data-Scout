@@ -72,6 +72,9 @@ class Candidate(BaseModel):
     channels: list[Channel]
     source_urls: list[str] = Field(description="Where this company was found")
     hypotheses: list[str] = Field(default=[], description="HolderHypothesis categories that led here")
+    source_verified: bool = Field(
+        default=False, description="At least one source page was confirmed to list this company"
+    )
     # Filled by the relevance screen
     relevance: Relevance | None = None
     relevance_reason: str | None = None

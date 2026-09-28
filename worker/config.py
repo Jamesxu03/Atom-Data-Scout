@@ -1,11 +1,19 @@
-"""Central settings: models, limits, scoring weights."""
+"""Central settings: model, speed, limits, scoring weights."""
 
-# Cheap bulk work (profile extraction) vs. reasoning work (hypotheses, scoring)
-MODEL_FLASH = "gemini-3.8-flash"
-MODEL_PRO = MODEL_FLASH  # Flash for everything for now; Pro option: "gemini-3.1-pro-preview"
+# Every Gemini call uses this model
+MODEL = "gemini-3.8-flash"
 
-# Discovery budget. Each unit below is one Gemini call with Google Search, so it costs money
-# (and the free tier allows ~20 calls/day in total). Raise once the flow works.
+# Reasoning effort: "minimal" | "low" | "medium" | "high". "low" made a search call ~2.5x
+# faster than the default (24s -> 10s) with the same answer. Hypotheses get a bit more.
+THINKING_LEVEL = "low"
+HYPOTHESES_THINKING_LEVEL = "medium"
+
+# Concurrency: Gemini calls and page fetches run in parallel threads
+PARALLEL_LLM_CALLS = 8
+PARALLEL_FETCHES = 16
+PARALLEL_CRAWLS = 3  # deep crawls may each start a headless browser
+
+# Discovery budget. Each unit below is one Gemini call with Google Search, so it costs money.
 DISCOVERY = {
     "product_search_hypotheses": 5,  # (a) one call per hypothesis
     "snowball_seeds": 3,  # (b) one call per seed company

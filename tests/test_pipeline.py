@@ -2,13 +2,19 @@
 
 from tests.test_discovery import HYPS, _router
 from tests.test_hypotheses import SPEC
-from tests.test_screen import _label_by_prefix
 from worker import pipeline, runs
 from worker.crawl import CrawlResult, Page
 from worker.schemas import DataSpec, FoundList
 from worker.steps.contacts import FoundContact, FoundContacts
 from worker.steps.hypotheses import HypothesisList
-from worker.steps.screen import ScreenBatch
+from worker.steps.screen import ScreenBatch, ScreenItem
+
+
+def _otter_yes_rest_no(prompt: str) -> ScreenBatch:
+    domains = [line[4:].split(" ")[0] for line in prompt.splitlines() if line.startswith("### ")]
+    return ScreenBatch(results=[
+        ScreenItem(domain=d, label="yes" if d == "otter.ai" else "no", reason="r") for d in domains
+    ])
 
 
 def test_live_run_funnel(fake_ask, monkeypatch, tmp_path):
@@ -17,8 +23,7 @@ def test_live_run_funnel(fake_ask, monkeypatch, tmp_path):
     fake_ask.responses[DataSpec] = SPEC
     fake_ask.responses[HypothesisList] = HypothesisList(hypotheses=HYPS)
     fake_ask.responses[FoundList] = _router
-    # label otter.ai yes, everything else no
-    fake_ask.responses[ScreenBatch] = lambda p: _label_by_prefix(p.replace("### otter.ai", "### yes-otter.ai"))
+    fake_ask.responses[ScreenBatch] = _otter_yes_rest_no
 
     monkeypatch.setattr("worker.steps.contacts.fetch_html", lambda url: "<p>ceo@otter.ai</p>")
     monkeypatch.setattr("worker.steps.contacts.fetch_html_quick", lambda url: "<p>nothing</p>")
@@ -38,6 +43,13 @@ def test_live_run_funnel(fake_ask, monkeypatch, tmp_path):
     assert f.found > f.deduped > 0
     assert f.relevant == sum(c.relevance in ("yes", "maybe") for c in out.candidates)
     assert f.profiled == len(crawled) <= pipeline.MAX_PROFILED
+    # snowball ran after screening, seeded from the one "yes" company
+    snowball_prompts = [c.prompt for c in fake_ask.calls if "compete with" in c.prompt]
+    assert len(snowball_prompts) == 1 and "compete with Otter" in snowball_prompts[0]
+    rival = next(c for c in out.candidates if c.domain == "rival-otter.com")
+    assert rival.relevance == "no"  # new snowball company was screened too
+    assert not out.partial
+
     otter = next(c for c in out.candidates if c.domain == "otter.ai")
     assert [(k.email, k.verified) for k in otter.contacts] == [
         ("ceo@otter.ai", True),  # from the website
@@ -46,3 +58,27 @@ def test_live_run_funnel(fake_ask, monkeypatch, tmp_path):
     assert f.with_contacts == 1
     for name in ("spec", "hypotheses", "discovery", "output"):
         assert (tmp_path / out.run_dir.split("/")[-1] / f"{name}.json").exists()
+
+
+def test_quota_mid_run_saves_partial_results(fake_ask, monkeypatch, tmp_path):
+    from worker.llm import QuotaExceeded
+
+    monkeypatch.setattr(runs, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr("worker.steps.screen.fetch_homepage_text", lambda url: "text")
+    fake_ask.responses[DataSpec] = SPEC
+    fake_ask.responses[HypothesisList] = HypothesisList(hypotheses=HYPS)
+    fake_ask.responses[FoundList] = _router
+
+    def quota(prompt):
+        raise QuotaExceeded("limit: 20 requests per day")
+
+    fake_ask.responses[ScreenBatch] = quota
+
+    out = pipeline.run("brief", progress=lambda _: None)  # must not raise
+
+    assert out.partial
+    assert any("quota" in e.lower() for e in out.errors)
+    assert out.funnel.found > 0 and out.funnel.deduped > 0  # discovery results kept
+    assert out.funnel.profiled == 0
+    run_dir = tmp_path / out.run_dir.split("/")[-1]
+    assert (run_dir / "output.json").exists() and (run_dir / "discovery.json").exists()

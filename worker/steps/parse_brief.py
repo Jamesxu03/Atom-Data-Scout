@@ -6,7 +6,7 @@ Run: uv run python -m worker.steps.parse_brief "brief text"
 import sys
 
 from worker import llm, runs
-from worker.config import MODEL_FLASH
+from worker.config import MODEL
 from worker.schemas import DataSpec
 
 PROMPT = """You are helping a data broker understand what a buyer wants to acquire.
@@ -25,7 +25,7 @@ Buyer brief:
 
 
 def parse_brief(brief: str) -> DataSpec:
-    return llm.ask(PROMPT.format(brief=brief), DataSpec, model=MODEL_FLASH)
+    return llm.ask(PROMPT.format(brief=brief), DataSpec, model=MODEL)
 
 
 if __name__ == "__main__":

@@ -10,11 +10,12 @@ actually appears there. Only business contact details published publicly are col
 
 import re
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 from pydantic import BaseModel
 
 from worker import llm
-from worker.config import CONTACTS_PER_COMPANY, MODEL_FLASH
+from worker.config import CONTACTS_PER_COMPANY, MODEL, PARALLEL_FETCHES
 from worker.crawl import CrawlResult, fetch_html, fetch_html_quick
 from worker.discovery.domains import normalize_domain
 from worker.schemas import Candidate, Contact
@@ -89,6 +90,7 @@ def from_website(crawl: CrawlResult, html_for: Callable[[str], str] | None = Non
             html = html_for(page.url)
         except Exception:  # page came from cache during crawl; a miss here isn't worth failing on
             continue
+        html = _strip_code(html)  # emails inside scripts are config/tracking, not contacts
         for email in dict.fromkeys(e.lower() for e in EMAIL_RE.findall(html)):
             host = email.split("@")[1]
             if (host == company or host.endswith("." + company)) and not JUNK_EMAIL.search(email):
@@ -104,33 +106,67 @@ def _digits(s: str) -> str:
     return re.sub(r"\D", "", s)
 
 
+def _strip_code(html: str) -> str:
+    return re.sub(r"<(script|style|noscript)\b.*?</\1\s*>", " ", html, flags=re.I | re.S)
+
+
+def _visible_text(html: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", _strip_code(html)))
+
+
+PHONE_IN_TEXT = re.compile(r"\+?\d[\d\s().-]{5,}\d")
+
+
+def _same_phone(a: str, b: str) -> bool:
+    """Same number, allowing for country-code / trunk-prefix formatting differences."""
+    da, db = _digits(a), _digits(b)
+    return len(da) >= 7 and len(db) >= 7 and da[-9:] == db[-9:]
+
+
+def email_on_page(email: str, html: str) -> bool:
+    """Whole-address match: an@acme.com does not match inside jean@acme.com."""
+    pattern = r"(?<![\w.%+-])" + re.escape(email) + r"(?![\w-]|\.[a-z0-9])"
+    return re.search(pattern, _strip_code(html), re.I) is not None
+
+
+def phone_on_page(phone: str, html: str) -> bool:
+    """Only in tel: links or visible text — never digits glued together from scripts or IDs."""
+    candidates = TEL_RE.findall(html) + PHONE_IN_TEXT.findall(_visible_text(html))
+    return any(_same_phone(phone, c) for c in candidates)
+
+
+def name_on_page(name: str, html: str) -> bool:
+    pattern = r"\b" + r"\s+".join(map(re.escape, name.split())) + r"\b"
+    return re.search(pattern, _visible_text(html), re.I) is not None
+
+
 def verify(c: Contact, html_for: Callable[[str], str] | None = None) -> bool:
     """Does the email / phone (or, failing those, the name) appear on source_url?"""
     html_for = html_for or fetch_html_quick
     try:
-        html = html_for(c.source_url).lower()
+        html = html_for(c.source_url)
     except Exception:  # unreachable (or LinkedIn blocking us) = can't verify, not "false"
         return False
     if c.email:
-        return c.email.lower() in html
+        return email_on_page(c.email, html)
     if c.phone:
-        digits = _digits(c.phone)[-9:]  # ignore country-code formatting differences
-        return len(digits) >= 7 and digits in _digits(html)
-    return bool(c.name) and c.name.lower() in html
+        return phone_on_page(c.phone, html)
+    return bool(c.name) and name_on_page(c.name, html)
 
 
 def from_search(candidate: Candidate, verifier: Callable[[Contact], bool] | None = None) -> list[Contact]:
     verifier = verifier or verify
     prompt = PROMPT.format(name=candidate.name, website=candidate.website, n=CONTACTS_PER_COMPANY)
-    found = llm.ask(prompt, FoundContacts, model=MODEL_FLASH, use_search=True).contacts
+    found = llm.ask(prompt, FoundContacts, model=MODEL, use_search=True).contacts
     out = []
     for f in found[:CONTACTS_PER_COMPANY]:
         if not (f.name or f.email or f.phone):
             continue
         email = f.email.strip().lower() if f.email and EMAIL_RE.fullmatch(f.email.strip()) else None
-        c = Contact(**{**f.model_dump(), "email": email}, origin="search")
-        c.verified = verifier(c)
-        out.append(c)
+        out.append(Contact(**{**f.model_dump(), "email": email}, origin="search"))
+    with ThreadPoolExecutor(PARALLEL_FETCHES) as pool:  # each check fetches a page
+        for c, ok in zip(out, pool.map(verifier, out)):
+            c.verified = ok
     return out
 
 
@@ -138,16 +174,30 @@ def _key(c: Contact) -> str:
     return (c.email or _digits(c.phone or "") or (c.name or "")).lower()
 
 
+def _combine(a: Contact, b: Contact) -> Contact:
+    """One contact from two records of the same email/phone/name, whatever order they come in.
+
+    The verified record supplies source and origin; name and role come from whichever record
+    names a person; other gaps are filled from either.
+    """
+    primary, other = (a, b) if (a.verified, bool(a.name)) >= (b.verified, bool(b.name)) else (b, a)
+    named = primary if primary.name or not other.name else other
+    merged = {f: getattr(primary, f) or getattr(other, f) for f in ("email", "phone", "linkedin_url")}
+    return primary.model_copy(update={
+        **merged,
+        "name": named.name,
+        "role": named.role or primary.role or other.role,
+        "verified": a.verified or b.verified,
+    })
+
+
 def merge_contacts(contacts: list[Contact]) -> list[Contact]:
-    """Dedupe (a named search hit beats a bare website email); verified people with email first."""
+    """Dedupe by email / phone / name; verified people with email first."""
     by_key: dict[str, Contact] = {}
     for c in contacts:
         k = _key(c)
-        if not k:
-            continue
-        old = by_key.get(k)
-        if old is None or (c.name and not old.name) or (c.verified and not old.verified):
-            by_key[k] = c.model_copy(update={"verified": c.verified or (old.verified if old else False)})
+        if k:
+            by_key[k] = _combine(by_key[k], c) if k in by_key else c
     return sorted(by_key.values(), key=lambda c: (not c.verified, not c.name, not c.email))
 
 

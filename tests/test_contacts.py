@@ -3,9 +3,12 @@ from worker.schemas import Candidate, Contact
 from worker.steps.contacts import (
     FoundContact,
     FoundContacts,
+    email_on_page,
     from_search,
     from_website,
     merge_contacts,
+    name_on_page,
+    phone_on_page,
     verify,
 )
 
@@ -72,3 +75,33 @@ def test_merge_prefers_named_and_verified():
     jane = got[0]
     assert (jane.name, jane.verified) == ("Jane Doe", True)  # kept name, inherited verification
     assert got[-1].name == "Unverified Person"
+
+
+def test_email_match_needs_whole_address():
+    page = "<p>Write to jean@acme.com or sales@acme.com.au</p>"
+    assert email_on_page("jean@acme.com", page)
+    assert not email_on_page("an@acme.com", page)  # substring of jean@
+    assert not email_on_page("sales@acme.com", page)  # prefix of sales@acme.com.au
+    assert email_on_page("JEAN@ACME.COM", page)
+    assert email_on_page("sales@acme.com.au", "<p>sales@acme.com.au.</p>")  # sentence full stop
+
+
+def test_phone_ignores_digits_in_scripts_and_ids():
+    script_only = "<script>var t=1727000000; id='44207946000299'</script><div data-id='2079460002'></div>"
+    assert not phone_on_page("+44 20 7946 0002", script_only)
+    assert phone_on_page("+44 20 7946 0002", "<p>Call 020 7946 0002</p>")
+    assert phone_on_page("+44 20 7946 0002", '<a href="tel:+442079460002">Call</a>')
+
+
+def test_name_needs_word_boundaries():
+    assert name_on_page("Jane Doe", "<p>Jane   Doe, CEO</p>")
+    assert not name_on_page("Ann Lee", "<p>Joann Leeds</p>")
+    assert not name_on_page("Jane Doe", "<script>'Jane Doe'</script>")
+
+
+def test_merge_keeps_name_whichever_order():
+    named_unverified = Contact(name="Jane Doe", role="CEO", email="jane@acme.com", source_url="search", verified=False)
+    bare_verified = Contact(email="jane@acme.com", source_url="site", origin="website", verified=True)
+    for order in ([named_unverified, bare_verified], [bare_verified, named_unverified]):
+        (jane,) = merge_contacts(order)
+        assert (jane.name, jane.role, jane.verified, jane.source_url) == ("Jane Doe", "CEO", True, "site")

@@ -1,4 +1,8 @@
-"""End-to-end: brief -> spec -> hypotheses -> discovery -> relevance screen -> deep crawl.
+"""End-to-end: brief -> spec -> hypotheses -> discovery -> screen -> snowball -> screen
+-> deep crawl + contacts. Independent calls run in parallel.
+
+If the Gemini quota runs out mid-run, everything gathered so far is saved and returned with
+partial=True instead of being lost.
 
 Profile extraction and scoring aren't wired into live runs yet; demo mode shows the full output.
 """
@@ -11,11 +15,12 @@ from collections.abc import Callable
 from pydantic import BaseModel
 
 from worker import runs
-from worker.config import FIND_CONTACTS, MAX_PROFILED
+from worker.config import FIND_CONTACTS, MAX_PROFILED, PARALLEL_CRAWLS
 from worker.crawl import CrawlResult, crawl
 from worker.demo import demo_candidates, demo_results
-from worker.discovery import discover
+from worker.discovery import Discovery, discover, pick_seeds, snowball
 from worker.llm import QuotaExceeded
+from worker.parallel import run_parallel
 from worker.schemas import Candidate, Funnel, Result
 from worker.scoring import compute_total
 from worker.steps.contacts import find_contacts
@@ -32,6 +37,8 @@ class RunOutput(BaseModel):
     crawls: list[CrawlResult] = []
     results: list[Result] = []  # scored profiles (demo only for now)
     run_dir: str | None = None
+    partial: bool = False  # quota ran out: stages after that point are missing or incomplete
+    errors: list[str] = []
 
 
 def run(
@@ -55,31 +62,39 @@ def run(
     hyps = HypothesisList(hypotheses=hypotheses(spec))
     runs.save(run_dir, "hypotheses", hyps)
 
-    progress("Discovering candidate companies")
-    d = discover(spec, hyps.hypotheses, seeds=seeds, progress=progress)
-    runs.save(run_dir, "discovery", d)
+    d = Discovery(hits=[], candidates=[])
+    crawls: list[CrawlResult] = []
+    errors: list[str] = []
+    partial = False
+    try:
+        progress("Discovering candidate companies")
+        d = discover(spec, hyps.hypotheses, progress=progress)
+        runs.save(run_dir, "discovery", d)
+        if d.partial:
+            raise QuotaExceeded("quota ran out during discovery")
 
-    progress(f"Screening {len(d.candidates)} homepages for relevance")
-    screen(spec, d.candidates, progress=progress)
+        progress(f"Screening {len(d.candidates)} homepages for relevance")
+        screen(spec, d.candidates, progress=progress)
+        runs.save(run_dir, "discovery", d)
+
+        seed_list = pick_seeds(d.candidates, explicit=list(seeds))
+        if seed_list:
+            progress(f"Snowballing from {len(seed_list)} relevant companies")
+            d = snowball(d, seed_list, progress=progress)
+            runs.save(run_dir, "discovery", d)
+            screen(spec, d.candidates, progress=progress)  # only the new ones
+            runs.save(run_dir, "discovery", d)
+            if d.partial:
+                raise QuotaExceeded("quota ran out during snowballing")
+
+        crawls = _profile(relevant(d.candidates)[:MAX_PROFILED], crawler, progress, errors)
+    except QuotaExceeded as e:
+        partial = True
+        errors.append(f"Stopped early — Gemini quota: {str(e)[:300]}")
+        progress("Quota ran out — saving what was found so far")
+
     runs.save(run_dir, "discovery", d)
     keep = relevant(d.candidates)
-
-    crawls = []
-    for c in keep[:MAX_PROFILED]:
-        progress(f"Deep crawl: {c.domain}")
-        cr = crawler(c.website)
-        crawls.append(cr)
-        if not cr.homepage:
-            continue
-        progress(f"Finding contacts: {c.domain}")
-        try:
-            c.contacts = find_contacts(c, cr, use_search=FIND_CONTACTS)
-        except QuotaExceeded:
-            raise
-        except Exception as e:  # keep the run going; the crawl result is still useful
-            cr.errors.append(f"contacts: {type(e).__name__}: {str(e)[:200]}")
-    runs.save(run_dir, "discovery", d)
-
     funnel = Funnel(
         found=len(d.hits),
         deduped=len(d.candidates),
@@ -87,17 +102,49 @@ def run(
         profiled=sum(1 for cr in crawls if cr.homepage),
         with_contacts=sum(1 for c in d.candidates if any(k.verified for k in c.contacts)),
     )
-    out = RunOutput(funnel=funnel, candidates=d.candidates, crawls=crawls, run_dir=str(run_dir))
+    out = RunOutput(
+        funnel=funnel, candidates=d.candidates, crawls=crawls, run_dir=str(run_dir),
+        partial=partial, errors=d.errors + errors,
+    )
     runs.save(run_dir, "output", out)
     return out
 
 
+def _profile(
+    candidates: list[Candidate],
+    crawler: Callable[[str], CrawlResult],
+    progress: Progress,
+    errors: list[str],
+) -> list[CrawlResult]:
+    """Deep crawl + contacts for each candidate, a few companies at a time."""
+
+    def one(c: Candidate) -> CrawlResult:
+        cr = crawler(c.website)
+        if cr.homepage:
+            progress(f"Finding contacts: {c.domain}")
+            try:
+                c.contacts = find_contacts(c, cr, use_search=FIND_CONTACTS)
+            except QuotaExceeded:
+                raise
+            except Exception as e:  # keep the run going; the crawl result is still useful
+                cr.errors.append(f"contacts: {type(e).__name__}: {str(e)[:200]}")
+        return cr
+
+    batch = run_parallel(
+        [(f"Deep crawl: {c.domain}", lambda c=c: one(c)) for c in candidates], PARALLEL_CRAWLS, progress
+    )
+    errors.extend(batch.errors)
+    if batch.quota_error:
+        raise QuotaExceeded(batch.quota_error)
+    return [cr for _, cr in batch.results]
+
+
 def _demo_run(progress: Progress) -> RunOutput:
     for step in ["Analysing brief", "Guessing who holds this data",
-                 "Discovering candidate companies", "Screening homepages", "Deep crawl",
-                 "Finding contacts"]:
+                 "Discovering candidate companies", "Screening homepages",
+                 "Snowballing from relevant companies", "Deep crawl", "Finding contacts"]:
         progress(step)
-        time.sleep(0.3)
+        time.sleep(0.2)
     results = demo_results()
     for r in results:
         r.score.total = compute_total(r.score)

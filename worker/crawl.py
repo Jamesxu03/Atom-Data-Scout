@@ -1,7 +1,9 @@
 """Fetch a company's homepage, privacy policy and terms as clean text.
 
 httpx + trafilatura first; falls back to playwright for JS-rendered pages.
-Raw HTML is cached in data/cache/ so re-runs don't re-download.
+HTML is cached in data/cache/ so re-runs don't re-download: raw httpx responses and
+browser-rendered pages are cached separately, so a JS shell cached by the cheap homepage
+screen never stops the deep crawl from rendering the page.
 Never raises for a bad site — failures are recorded in CrawlResult.errors.
 """
 
@@ -42,8 +44,18 @@ class CrawlResult(BaseModel):
         return [p for p in (self.homepage, self.privacy, self.terms, self.contact) if p]
 
 
-def _cache_path(url: str) -> Path:
-    return CACHE_DIR / (hashlib.sha256(url.encode()).hexdigest()[:24] + ".html")
+def _cache_path(url: str, rendered: bool = False) -> Path:
+    suffix = ".rendered.html" if rendered else ".html"
+    return CACHE_DIR / (hashlib.sha256(url.encode()).hexdigest()[:24] + suffix)
+
+
+def _read_cache(path: Path) -> str | None:
+    return path.read_text(encoding="utf-8", errors="ignore") if path.exists() else None
+
+
+def _write_cache(path: Path, html: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html, encoding="utf-8")
 
 
 def _fetch_httpx(url: str) -> str:
@@ -53,37 +65,44 @@ def _fetch_httpx(url: str) -> str:
         return r.text
 
 
-def _fetch_playwright(url: str) -> str:
-    from playwright.sync_api import sync_playwright
+class Browser:
+    """One headless Chromium, started on first use and shared by every page of a crawl.
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
+    Playwright's sync API is per-thread: create and use a Browser inside a single thread.
+    """
+
+    def __init__(self):
+        self._pw = self._browser = None
+
+    def render(self, url: str) -> str:
+        if self._browser is None:
+            from playwright.sync_api import sync_playwright
+
+            self._pw = sync_playwright().start()
+            self._browser = self._pw.chromium.launch()
+        page = self._browser.new_page(user_agent=USER_AGENT)
         try:
-            page = browser.new_page(user_agent=USER_AGENT)
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             page.wait_for_timeout(3000)  # give client-side rendering a moment
             return page.content()
         finally:
-            browser.close()
+            page.close()
+
+    def close(self) -> None:
+        if self._browser is not None:
+            self._browser.close()
+            self._pw.stop()
+            self._pw = self._browser = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
 
-def fetch_html(url: str) -> str:
-    """Return HTML for url, using cache; httpx first, playwright if text looks empty."""
-    path = _cache_path(url)
-    if path.exists():
-        return path.read_text(encoding="utf-8", errors="ignore")
-
-    html = ""
-    try:
-        html = _fetch_httpx(url)
-    except Exception:
-        pass
-    if len(trafilatura.extract(html) or "") < MIN_TEXT_CHARS:
-        html = _fetch_playwright(url) or html  # let playwright errors propagate
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(html, encoding="utf-8")
-    return html
+def _has_text(html: str) -> bool:
+    return len(trafilatura.extract(html) or "") >= MIN_TEXT_CHARS
 
 
 def fetch_html_quick(url: str) -> str:
@@ -91,11 +110,41 @@ def fetch_html_quick(url: str) -> str:
     if not url.startswith("http"):
         url = "https://" + url
     path = _cache_path(url)
-    if path.exists():
-        return path.read_text(encoding="utf-8", errors="ignore")
-    html = _fetch_httpx(url)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(html, encoding="utf-8")
+    html = _read_cache(path)
+    if html is None:
+        html = _fetch_httpx(url)
+        _write_cache(path, html)
+    return html
+
+
+def fetch_html(url: str, browser: Browser | None = None) -> str:
+    """HTML for url: rendered cache, else httpx (cached), else render with playwright.
+
+    The browser is only used when httpx fails or returns a JS shell with no main text.
+    """
+    rendered_path = _cache_path(url, rendered=True)
+    if (html := _read_cache(rendered_path)) is not None:
+        return html
+
+    raw, raw_error = "", None
+    try:
+        raw = fetch_html_quick(url)
+    except Exception as e:  # blocked or JS-only site: the browser may still get it
+        raw_error = e
+    if raw and _has_text(raw):
+        return raw
+
+    try:
+        if browser is not None:
+            html = browser.render(url)
+        else:
+            with Browser() as b:
+                html = b.render(url)
+    except Exception as render_error:
+        if raw:  # a thin page beats nothing
+            return raw
+        raise (raw_error or render_error) from None  # the httpx error is usually more telling
+    _write_cache(rendered_path, html)
     return html
 
 
@@ -117,9 +166,15 @@ def fetch_homepage_text(website: str) -> str:
     return text.strip()
 
 
+def same_site(url: str, base_url: str) -> bool:
+    """url is on base_url's site or a subdomain of it (notacme.com is not acme.com)."""
+    host = (urlparse(url).hostname or "").lower()
+    base = (urlparse(base_url).hostname or "").lower().removeprefix("www.")
+    return bool(base) and (host == base or host.endswith("." + base))
+
+
 def _find_link(html: str, base_url: str, kind: str) -> str | None:
     pattern = LINK_PATTERNS[kind]
-    base_host = urlparse(base_url).netloc
     links = re.findall(r'<a[^>]+href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', html, re.I | re.S)
     # prefer a match in the URL itself, then fall back to the link label
     for match_label in (False, True):
@@ -128,14 +183,13 @@ def _find_link(html: str, base_url: str, kind: str) -> str | None:
             if not pattern.search(target):
                 continue
             url = urljoin(base_url, href)
-            # stay on the company's own site (or a subdomain of it)
-            if urlparse(url).netloc.endswith(base_host.removeprefix("www.")):
+            if same_site(url, base_url):
                 return url
     return None
 
 
-def _page(url: str) -> Page:
-    html = fetch_html(url)
+def _page(url: str, browser: Browser) -> Page:
+    html = fetch_html(url, browser)
     text = trafilatura.extract(html, include_links=False) or ""
     if not text:
         raise ValueError("no main text extracted")
@@ -147,22 +201,23 @@ def crawl(website: str) -> CrawlResult:
         website = "https://" + website
     result = CrawlResult(website=website)
 
-    try:
-        home_html = fetch_html(website)
-        result.homepage = _page(website)
-    except Exception as e:
-        result.errors.append(f"homepage: {type(e).__name__}: {e}")
-        return result
-
-    for kind in ("privacy", "terms", "contact"):
-        link = _find_link(home_html, website, kind)
-        if not link:
-            result.errors.append(f"{kind}: no link found on homepage")
-            continue
+    with Browser() as browser:  # only launched if some page needs rendering
         try:
-            setattr(result, kind, _page(link))
+            home_html = fetch_html(website, browser)
+            result.homepage = _page(website, browser)
         except Exception as e:
-            result.errors.append(f"{kind}: {type(e).__name__}: {e}")
+            result.errors.append(f"homepage: {type(e).__name__}: {e}")
+            return result
+
+        for kind in ("privacy", "terms", "contact"):
+            link = _find_link(home_html, website, kind)
+            if not link:
+                result.errors.append(f"{kind}: no link found on homepage")
+                continue
+            try:
+                setattr(result, kind, _page(link, browser))
+            except Exception as e:
+                result.errors.append(f"{kind}: {type(e).__name__}: {e}")
     return result
 
 
@@ -170,7 +225,7 @@ if __name__ == "__main__":
     import sys
 
     r = crawl(sys.argv[1] if len(sys.argv) > 1 else "https://otter.ai")
-    for kind in ("homepage", "privacy", "terms"):
+    for kind in ("homepage", "privacy", "terms", "contact"):
         p = getattr(r, kind)
         print(f"{kind:9} {p.url if p else '-':60} {len(p.text) if p else 0:>7} chars")
     for e in r.errors:

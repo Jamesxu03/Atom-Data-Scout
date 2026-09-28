@@ -5,6 +5,8 @@ import os
 from dotenv import load_dotenv
 from google import genai
 
+from worker.config import MODEL
+
 load_dotenv()
 
 key = os.getenv("GEMINI_API_KEY")
@@ -13,7 +15,7 @@ if not key:
 
 client = genai.Client(api_key=key)
 interaction = client.interactions.create(
-    model="gemini-3.8-flash",
+    model=MODEL,
     input="Reply with one short sentence confirming you are working.",
 )
 print(interaction.output_text)

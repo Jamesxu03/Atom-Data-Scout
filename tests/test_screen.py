@@ -54,3 +54,38 @@ def test_screen_batches(fake_ask):
     screen(SPEC, cands, fetch=lambda _: "text", progress=lambda _: None)
     assert len(fake_ask.calls) == 3
     assert all(c.relevance == "yes" for c in cands)
+
+
+def test_dead_domain_dropped_blocked_site_kept(fake_ask):
+    import httpx
+
+    fake_ask.responses[ScreenBatch] = _label_by_prefix
+    cands = [_cand(d) for d in ["made-up.com", "blocked.com", "slow.com"]]
+    req = httpx.Request("GET", "https://blocked.com")
+
+    def fetch(url):
+        if "made-up" in url:
+            raise httpx.ConnectError("nodename nor servname provided")
+        if "blocked" in url:
+            raise httpx.HTTPStatusError("403", request=req, response=httpx.Response(403, request=req))
+        raise httpx.ReadTimeout("timed out")
+
+    screen(SPEC, cands, fetch=fetch, progress=lambda _: None)
+    by = {c.domain: c for c in cands}
+    assert by["made-up.com"].relevance == "no"
+    assert "dead website" in by["made-up.com"].relevance_reason
+    assert by["blocked.com"].relevance == "maybe"
+    assert by["slow.com"].relevance == "maybe"
+    assert [c.domain for c in relevant(cands)] == ["blocked.com", "slow.com"]
+    assert fake_ask.calls == []  # nothing reachable, nothing sent to the model
+
+
+def test_only_unlabelled_candidates_are_screened(fake_ask):
+    fake_ask.responses[ScreenBatch] = _label_by_prefix
+    done = _cand("yes-old.com")
+    done.relevance, done.relevance_reason = "no", "screened earlier"
+    new = _cand("yes-new.com")
+    fetched = []
+    screen(SPEC, [done, new], fetch=lambda url: fetched.append(url) or "text", progress=lambda _: None)
+    assert fetched == ["https://yes-new.com"]
+    assert (done.relevance, new.relevance) == ("no", "yes")

@@ -6,11 +6,20 @@ Run: uv run python -m worker.steps.screen [run_dir]   (needs spec.json + discove
 
 from collections.abc import Callable
 
+import httpx
 from pydantic import BaseModel, Field
 
 from worker import llm
-from worker.config import MODEL_FLASH, SCREEN_BATCH_SIZE, SCREEN_TEXT_CHARS
+from worker.config import (
+    MODEL,
+    PARALLEL_FETCHES,
+    PARALLEL_LLM_CALLS,
+    SCREEN_BATCH_SIZE,
+    SCREEN_TEXT_CHARS,
+)
 from worker.crawl import fetch_homepage_text
+from worker.llm import QuotaExceeded
+from worker.parallel import run_parallel
 from worker.schemas import Candidate, DataSpec, Relevance
 
 
@@ -56,8 +65,13 @@ def _label_batch(spec: DataSpec, batch: list[tuple[Candidate, str]]) -> dict[str
         labels=", ".join(spec.label_types) or "none",
         companies=companies,
     )
-    result = llm.ask(prompt, ScreenBatch, model=MODEL_FLASH)
+    result = llm.ask(prompt, ScreenBatch, model=MODEL)
     return {item.domain.lower(): item for item in result.results}
+
+
+# Domain doesn't resolve, refuses connections or isn't a valid URL: usually a website the model
+# made up. 403s, timeouts and 5xx are different — often bot protection on a real site.
+DEAD_SITE_ERRORS = (httpx.ConnectError, httpx.UnsupportedProtocol, httpx.InvalidURL)
 
 
 def screen(
@@ -66,26 +80,49 @@ def screen(
     fetch: Callable[[str], str] | None = None,
     progress: Callable[[str], None] = print,
 ) -> list[Candidate]:
-    """Set relevance + relevance_reason on each candidate (in place) and return them."""
+    """Label every candidate that has no relevance yet (in place) and return all of them.
+
+    Raises QuotaExceeded after saving the labels it did get.
+    """
     fetch = fetch or fetch_homepage_text
-    reachable: list[tuple[Candidate, str]] = []
-    for c in candidates:
+    todo = [c for c in candidates if c.relevance is None]
+    if not todo:
+        return candidates
+
+    def try_fetch(c: Candidate) -> str | None:
+        """Homepage text, or None with the failure recorded on the candidate."""
         try:
-            reachable.append((c, fetch(c.website)))
+            return fetch(c.website)
+        except DEAD_SITE_ERRORS as e:
+            c.relevance = "no"
+            c.relevance_reason = f"dead website: {type(e).__name__} (domain doesn't resolve or refuses connections)"
         except Exception as e:
             # Can't judge without a homepage; keep it rather than lose a real company to a bot block
             c.relevance, c.relevance_reason = "maybe", f"homepage unreachable ({type(e).__name__})"
+        return None
 
-    for i in range(0, len(reachable), SCREEN_BATCH_SIZE):
-        batch = reachable[i : i + SCREEN_BATCH_SIZE]
-        progress(f"Screening {i + 1}–{i + len(batch)} of {len(reachable)}")
-        labels = _label_batch(spec, batch)
+    progress(f"Fetching {len(todo)} homepages")
+    fetched = dict(run_parallel(
+        [(c.domain, lambda c=c: try_fetch(c)) for c in todo], PARALLEL_FETCHES, lambda _: None
+    ).results)
+    reachable = [(c, fetched[c.domain]) for c in todo if fetched.get(c.domain)]
+
+    batches = [reachable[i : i + SCREEN_BATCH_SIZE] for i in range(0, len(reachable), SCREEN_BATCH_SIZE)]
+    labelled = run_parallel(
+        [(f"Screening {i * SCREEN_BATCH_SIZE + 1}–{i * SCREEN_BATCH_SIZE + len(b)} of {len(reachable)}",
+          lambda b=b: (b, _label_batch(spec, b))) for i, b in enumerate(batches)],
+        PARALLEL_LLM_CALLS,
+        progress,
+    )
+    for _, (batch, labels) in labelled.results:
         for c, _ in batch:
             item = labels.get(c.domain)
             if item:
                 c.relevance, c.relevance_reason = item.label, item.reason
             else:
                 c.relevance, c.relevance_reason = "maybe", "not labelled by the model"
+    if labelled.quota_error:
+        raise QuotaExceeded(labelled.quota_error)
     return candidates
 
 

@@ -1,9 +1,13 @@
 """Discovery channels. Each is one Gemini call with Google Search returning companies + source URLs."""
 
+import re
+
 import httpx
 
 from worker import llm
-from worker.config import DISCOVERY, MODEL_FLASH
+from worker.config import DISCOVERY, MODEL
+from worker.crawl import fetch_html_quick
+from worker.discovery.domains import normalize_domain
 from worker.schemas import DataSpec, Found, FoundList, HolderHypothesis
 
 RULES = """Rules:
@@ -31,13 +35,40 @@ def resolve_source(url: str) -> str:
         return url
 
 
+def _mentions(html: str, name: str, website: str) -> bool:
+    """Does the page mention the company, by domain name (e.g. 'fireflies') or full name?"""
+    text = html.lower()
+    domain = normalize_domain(website) or ""
+    labels = domain.split(".")
+    brand = labels[-2] if len(labels) >= 2 else ""
+    if len(brand) >= 3 and brand in text:
+        return True
+    words = re.sub(r"[^a-z0-9 ]", " ", name.lower()).split()
+    return bool(words) and " ".join(words) in re.sub(r"[^a-z0-9 ]", " ", text)
+
+
+def verify_source(found: Found) -> tuple[str, bool]:
+    """(real source URL, verified).
+
+    The search response doesn't list the pages it used, so check directly: a grounding
+    redirect only resolves if Google issued it; a URL the model wrote itself must load and
+    mention the company.
+    """
+    url = found.source_url
+    if GROUNDING_REDIRECT in url:
+        resolved = resolve_source(url)
+        return resolved, resolved != url
+    try:
+        html = fetch_html_quick(url)
+    except Exception:  # dead or blocked page: can't confirm the company was listed there
+        return url, False
+    return url, _mentions(html, found.name, found.website)
+
+
 def _search(prompt: str) -> list[Found]:
     n = DISCOVERY["companies_per_call"]
-    result = llm.ask(prompt + "\n" + RULES.format(n=n), FoundList, model=MODEL_FLASH, use_search=True)
-    companies = result.companies[:n]
-    for f in companies:
-        f.source_url = resolve_source(f.source_url)
-    return companies
+    result = llm.ask(prompt + "\n" + RULES.format(n=n), FoundList, model=MODEL, use_search=True)
+    return result.companies[:n]
 
 
 def product_search(h: HolderHypothesis) -> list[Found]:

@@ -9,7 +9,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from worker import llm, runs
-from worker.config import MODEL_PRO
+from worker.config import HYPOTHESES_THINKING_LEVEL, MODEL
 from worker.schemas import DataSpec, HolderHypothesis
 
 
@@ -58,7 +58,8 @@ Data specification:
 
 
 def hypotheses(spec: DataSpec) -> list[HolderHypothesis]:
-    result = llm.ask(PROMPT.format(spec=spec.model_dump_json(indent=2)), HypothesisList, model=MODEL_PRO)
+    prompt = PROMPT.format(spec=spec.model_dump_json(indent=2))
+    result = llm.ask(prompt, HypothesisList, model=MODEL, thinking=HYPOTHESES_THINKING_LEVEL)
     return result.hypotheses
 
 
