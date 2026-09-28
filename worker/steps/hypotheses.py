@@ -8,9 +8,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from worker import runs
+from worker import llm, runs
 from worker.config import MODEL_PRO
-from worker.llm import ask
 from worker.schemas import DataSpec, HolderHypothesis
 
 
@@ -36,9 +35,20 @@ For each category:
 - category: short name for the type of business
 - rationale: why this business would have the data, how much, and whether it is likely
   to come with labels and transferable rights
-- search_queries: 3–5 web search queries that would surface real companies of this type
-  (include at least one aimed at insolvent / closed companies, e.g. "administration",
-  "liquidation", "shut down", "acquired")
+- search_queries: 3–5 web search queries that would surface real companies of this type.
+
+How to write search_queries — this matters most:
+- Describe the PRODUCT OR SERVICE that generates the data, in the words these companies use
+  about themselves on their own homepages and in their marketing.
+- Never use dataset language. Companies holding data as a by-product don't describe
+  themselves as having "datasets", "corpora", "training data", "hours of audio" or
+  "annotated data" — so those words won't find them.
+- Good (for meeting audio): "AI meeting assistant that records and transcribes calls",
+  "conference call service for businesses", "sales call recording and coaching software".
+- Bad: "meeting audio dataset", "multi-speaker speech corpus", "buy transcribed audio".
+- Include at least one query that would surface companies that closed, went insolvent or
+  were acquired, still phrased around the product (e.g. "<product type> company shut down",
+  "<product type> startup acquired").
 
 Order categories from most to least promising.
 
@@ -48,7 +58,7 @@ Data specification:
 
 
 def hypotheses(spec: DataSpec) -> list[HolderHypothesis]:
-    result = ask(PROMPT.format(spec=spec.model_dump_json(indent=2)), HypothesisList, model=MODEL_PRO)
+    result = llm.ask(PROMPT.format(spec=spec.model_dump_json(indent=2)), HypothesisList, model=MODEL_PRO)
     return result.hypotheses
 
 

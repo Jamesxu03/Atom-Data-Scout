@@ -1,5 +1,6 @@
-"""Live test — makes one real Gemini call. Run: uv run pytest tests/test_llm.py -s"""
+"""Live test — makes one real Gemini call. Run: RUN_LIVE=1 uv run pytest tests/test_llm.py -s"""
 
+import pytest
 from pydantic import BaseModel
 
 from worker.llm import ask
@@ -10,6 +11,7 @@ class Capital(BaseModel):
     capital: str
 
 
+@pytest.mark.live
 def test_ask_returns_schema():
     result = ask("What is the capital of France?", Capital)
     print(result)
