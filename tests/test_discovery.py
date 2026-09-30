@@ -1,11 +1,19 @@
 import httpx
 
-from tests.test_hypotheses import SPEC
+from tests.test_hypotheses import BRIEF
 from worker.config import DISCOVERY
 from worker.discovery import Discovery, Hit, channels, discover, merge, pick_seeds, snowball
 from worker.discovery.domains import normalize_domain
 from worker.llm import QuotaExceeded
-from worker.schemas import Candidate, Found, FoundList, HolderHypothesis
+from worker.schemas import (
+    Candidate,
+    Contact,
+    EmailDraft,
+    Found,
+    FoundList,
+    HolderHypothesis,
+    Scores,
+)
 
 HYPS = [
     HolderHypothesis(category=f"cat {i}", rationale="r", search_queries=[f"query {i}"])
@@ -39,13 +47,23 @@ def test_merge_dedupes_by_domain_and_keeps_all_sources():
     assert otter.source_verified
 
 
-def test_merge_carries_over_screening():
+def test_merge_carries_over_everything_it_does_not_build():
     hits = [Hit(channel="product_search", name="Otter", website="https://otter.ai", source_url="s")]
     (old,) = merge(hits)
-    old.relevance, old.relevance_reason = "yes", "notetaker"
+    old.reason, old.holder_type, old.fit = "notetaker", "by_product", 4.2
+    old.scores = Scores(data_match=5, coverage=5)
+    old.contacts = [Contact(email="a@otter.ai", source_url="s")]
+    old.email = EmailDraft(subject="Hello", body="Hi")
     (new,) = merge(hits + [Hit(channel="snowball", name="Otter", website="otter.ai", source_url="s2")], previous=[old])
-    assert (new.relevance, new.relevance_reason) == ("yes", "notetaker")
-    assert new.channels == ["product_search", "snowball"]
+    assert (new.reason, new.holder_type, new.fit, new.scores) == ("notetaker", "by_product", 4.2, old.scores)
+    assert new.contacts == old.contacts and new.email == old.email
+    assert new.channels == ["product_search", "snowball"]  # rebuilt from the hits
+
+
+def test_merge_skips_excluded_domains():
+    hits = [Hit(channel="product_search", name="Otter", website="https://app.otter.ai", source_url="s"),
+            Hit(channel="product_search", name="Fireflies", website="https://fireflies.ai", source_url="s")]
+    assert [c.domain for c in merge(hits, exclusions=["https://www.otter.ai/"])] == ["fireflies.ai"]
 
 
 def _router(prompt: str) -> FoundList:
@@ -72,7 +90,7 @@ def _router(prompt: str) -> FoundList:
 
 def test_discover_runs_phase_one_channels_within_budget(fake_ask):
     fake_ask.responses[FoundList] = _router
-    d = discover(SPEC, HYPS, **QUIET)
+    d = discover(BRIEF, HYPS, **QUIET)
 
     angles = min(DISCOVERY["marketplace_calls"], len(channels.MARKETPLACE_ANGLES))
     public = min(DISCOVERY["public_source_calls"], len(channels.PUBLIC_ANGLES))
@@ -85,6 +103,7 @@ def test_discover_runs_phase_one_channels_within_budget(fake_ask):
     public_prompts = [c.prompt for c in fake_ask.calls if "not only companies" in c.prompt]
     assert len(set(public_prompts)) == public
     assert all("Also search in English" in p for p in public_prompts)
+    assert all("- features: multi-speaker" in p for p in vendor_prompts + public_prompts)
 
     by_domain = {c.domain: c for c in d.candidates}
     assert set(by_domain["otter.ai"].channels) == {"product_search", "directory"}
@@ -95,47 +114,62 @@ def test_discover_runs_phase_one_channels_within_budget(fake_ask):
     assert not d.partial
 
 
-def test_pick_seeds_uses_explicit_then_screened_yes_by_product_holders():
-    def cand(domain, relevance, channels, holder="by_product"):
+def test_discover_skips_channels_for_sources_the_buyer_rejects(fake_ask):
+    fake_ask.responses[FoundList] = _router
+    discover(BRIEF.model_copy(update={"holder_types": ["by_product"]}), HYPS, **QUIET)
+    assert not any("already produce or sell data" in c.prompt for c in fake_ask.calls)
+    assert not any("not only companies" in c.prompt for c in fake_ask.calls)
+    assert len(fake_ask.calls) == DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"]
+
+
+def test_pick_seeds_uses_explicit_then_well_scored_by_product_holders():
+    def cand(domain, fit, channels, holder="by_product", coverage=5):
         return Candidate(name=domain, website=f"https://{domain}", domain=domain, channels=channels,
-                         source_urls=[], relevance=relevance, holder_type=holder)
+                         source_urls=[], reason="r", fit=fit, holder_type=holder,
+                         scores=Scores(data_match=5, coverage=coverage))
 
     cands = [
-        cand("maybe.com", "maybe", ["product_search", "directory"]),
-        cand("one.com", "yes", ["product_search"]),
-        cand("two.com", "yes", ["product_search", "directory"]),
+        cand("low.com", 3.0, ["product_search", "directory"]),
+        cand("one.com", 4.0, ["product_search"]),
+        cand("two.com", 4.0, ["product_search", "directory"]),  # same fit, better corroborated
+        cand("best.com", 4.8, ["product_search"]),
         cand("unscreened.com", None, ["product_search", "directory", "marketplace"], holder=None),
-        cand("fireflies.ai", "yes", ["directory"]),
+        cand("fireflies.ai", 4.5, ["directory"]),
+        # high fit, but no evidence of the buyer's languages: its alternatives would be too
+        cand("global.com", 4.6, ["product_search", "directory"], coverage=1),
         # well corroborated, but alternatives to a tracking-hardware maker drift off topic
-        cand("tracker.com", "yes", ["product_search", "directory", "snowball"], holder="technology"),
-        cand("vendor.com", "yes", ["product_search", "directory", "marketplace"], holder="vendor"),
+        cand("tracker.com", 3.0, ["product_search", "directory", "snowball"], holder="technology"),
+        cand("vendor.com", 4.9, ["product_search", "directory", "marketplace"], holder="vendor"),
     ]
     seeds = pick_seeds(cands, explicit=[("Fireflies", "https://fireflies.ai")])
-    assert [w for _, w in seeds] == ["https://fireflies.ai", "https://two.com", "https://one.com"][: DISCOVERY["snowball_seeds"]]
+    assert [w for _, w in seeds] == ["https://fireflies.ai", "https://best.com", "https://two.com",
+                                     "https://one.com"][: DISCOVERY["snowball_seeds"]]
 
 
-def test_snowball_adds_competitors_and_keeps_labels(fake_ask):
+def test_snowball_adds_competitors_and_keeps_scores(fake_ask):
     fake_ask.responses[FoundList] = _router
-    d = discover(SPEC, HYPS, **QUIET)
+    d = discover(BRIEF, HYPS, **QUIET)
     otter = next(c for c in d.candidates if c.domain == "otter.ai")
-    otter.relevance = "yes"
+    otter.reason, otter.fit = "notetaker", 4.0
 
     d2 = snowball(d, [("Otter", "https://otter.ai")], **QUIET)
     by_domain = {c.domain: c for c in d2.candidates}
     assert by_domain["rival-otter.com"].channels == ["snowball"]
-    assert by_domain["rival-otter.com"].relevance is None  # new: needs screening
-    assert by_domain["otter.ai"].relevance == "yes"  # kept
+    assert not by_domain["rival-otter.com"].screened  # new: needs screening
+    assert (by_domain["otter.ai"].reason, by_domain["otter.ai"].fit) == ("notetaker", 4.0)  # kept
     assert [h.seed for h in d2.hits if h.channel == "snowball"] == ["Otter"]
     assert "buyer needs data in" not in fake_ask.calls[-1].prompt  # no languages given
 
 
-def test_snowball_limited_to_the_briefs_languages(fake_ask):
+def test_snowball_limited_to_the_briefs_languages_and_regions(fake_ask):
     fake_ask.responses[FoundList] = _router
-    d = Discovery(hits=[], candidates=[])
-    snowball(d, [("Beey", "https://beey.io")], languages=["Estonian", "Slovak"], **QUIET)
+    d = Discovery(hits=[], candidates=[], exclusions=["rival-beey.com"])
+    d2 = snowball(d, [("Beey", "https://beey.io")], languages=["Estonian", "Slovak"], regions=["Baltics"], **QUIET)
     (call,) = fake_ask.calls
     assert "The buyer needs data in: Estonian, Slovak" in call.prompt
     assert '"100+ languages"' in call.prompt  # global tools' generic claim doesn't count
+    assert "The buyer needs data from: Baltics" in call.prompt
+    assert d2.candidates == []  # the only competitor found is excluded
 
 
 def test_failed_channel_call_is_recorded_not_fatal(fake_ask):
@@ -145,7 +179,7 @@ def test_failed_channel_call_is_recorded_not_fatal(fake_ask):
         return _router(prompt)
 
     fake_ask.responses[FoundList] = flaky
-    d = discover(SPEC, HYPS, **QUIET)
+    d = discover(BRIEF, HYPS, **QUIET)
     assert d.candidates
     assert len(d.errors) == 1 and "marketplace listings" in d.errors[0]
     assert not d.partial
@@ -158,7 +192,7 @@ def test_quota_mid_discovery_keeps_hits_and_marks_partial(fake_ask):
         return _router(prompt)
 
     fake_ask.responses[FoundList] = quota_on_directories
-    d = discover(SPEC, HYPS, **QUIET)  # must not raise
+    d = discover(BRIEF, HYPS, **QUIET)  # must not raise
     assert d.partial
     assert d.candidates  # results from calls that finished are kept
     assert any("quota" in e for e in d.errors)
@@ -179,7 +213,7 @@ def test_verify_source(monkeypatch):
     assert channels.verify_source(Found(**ff, source_url="https://blog.example/other"))[1] is False
     assert channels.verify_source(Found(**ff, source_url="https://gone.example/x"))[1] is False
     # by full name when the domain label is too short to be meaningful
-    assert channels._mentions("<p>We love Read AI</p>", "Read AI", "https://www.read.ai")
+    assert channels.mention_at("<p>We love Read AI</p>", "Read AI", "https://www.read.ai") >= 0
 
 
 def test_verify_source_resolves_grounding_redirect(monkeypatch):

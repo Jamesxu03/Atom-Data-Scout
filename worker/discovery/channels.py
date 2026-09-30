@@ -8,7 +8,7 @@ from worker import llm
 from worker.config import DISCOVERY, MODEL
 from worker.crawl import fetch_html_quick
 from worker.discovery.domains import normalize_domain
-from worker.schemas import DataSpec, Found, FoundList, HolderHypothesis
+from worker.schemas import Brief, Found, FoundList, HolderHypothesis
 
 RULES = """Rules:
 - Use Google Search. Only return companies you actually found in search results.
@@ -49,10 +49,6 @@ def mention_at(text: str, name: str, website: str) -> int:
     return re.sub(r"[^a-z0-9 ]", " ", text).find(" ".join(words)) if words else -1
 
 
-def _mentions(html: str, name: str, website: str) -> bool:
-    return mention_at(html, name, website) >= 0
-
-
 def check_source_page(url: str) -> tuple[str, str | None, bool]:
     """(real URL, page HTML or None, grounded) for one source URL — fetched once, however many
     companies were found on it.
@@ -73,7 +69,7 @@ def check_source_page(url: str) -> tuple[str, str | None, bool]:
 def verify_source(found: Found, page: tuple[str, str | None, bool] | None = None) -> tuple[str, bool]:
     """(real source URL, verified) for one company. Pass `page` to reuse a fetched page."""
     url, html, grounded = page or check_source_page(found.source_url)
-    return url, grounded or (html is not None and _mentions(html, found.name, found.website))
+    return url, grounded or (html is not None and mention_at(html, found.name, found.website) >= 0)
 
 
 def _search(prompt: str) -> list[Found]:
@@ -94,11 +90,13 @@ Search with these queries (and close variations):
 Include small, niche, regional and defunct companies, not only market leaders.""")
 
 
-def snowball(seed_name: str, seed_website: str, languages: list[str] = ()) -> list[Found]:
+def snowball(
+    seed_name: str, seed_website: str, languages: list[str] = (), regions: list[str] = ()
+) -> list[Found]:
     """(b) Find competitors of a known relevant company via comparison pages.
 
-    With `languages`, only competitors working in one of them: "alternatives to X" pages
-    mostly list global, English-first tools, which add volume but not the language.
+    With `languages` or `regions`, only competitors working in one of them: "alternatives to
+    X" pages mostly list global, English-first tools, which add volume but not the language.
     """
     language_rule = f"""
 
@@ -107,6 +105,11 @@ working in at least one of these languages: a site written in it, the language n
 supported, or a base in a country where it is spoken. A generic "100+ languages" claim is
 not evidence. Also look for local competitors, e.g. search "{seed_name} alternative" together
 with a language or country name, and search in those languages.""" if languages else ""
+    if regions:
+        language_rule += f"""
+
+The buyer needs data from: {", ".join(regions)}. Prefer competitors based in or serving these
+regions, and search for local ones, e.g. "{seed_name} alternative" with a country name."""
     return _search(f"""Find companies that compete with {seed_name} ({seed_website}) —
 businesses offering a similar product to a similar customer.
 
@@ -156,15 +159,21 @@ paper or article.""",
 }
 
 
-def marketplace(spec: DataSpec, angle: str) -> list[Found]:
+def _wanted(brief: Brief) -> str:
+    return f"""- data type: {brief.data_type}
+- features: {", ".join(brief.features) or "any"}
+- scenarios: {", ".join(brief.scenarios) or "any"}
+- languages: {", ".join(brief.languages) or "any"}
+- regions: {", ".join(brief.regions) or "any"}
+- labels: {", ".join(brief.label_types) or "none"}"""
+
+
+def marketplace(brief: Brief, angle: str) -> list[Found]:
     """(d) Companies that already produce or sell this kind of data, searched from one angle."""
     return _search(f"""Find companies that already produce or sell data similar to this:
-- data type: {spec.data_type}
-- scenarios: {", ".join(spec.scenarios) or "any"}
-- languages: {", ".join(spec.languages) or "any"}
-- labels: {", ".join(spec.label_types) or "none"}
+{_wanted(brief)}
 
-{MARKETPLACE_ANGLES[angle].format(data_type=spec.data_type)}
+{MARKETPLACE_ANGLES[angle].format(data_type=brief.data_type)}
 
 Also search with the terms data vendors and researchers use for this kind of data, which
 may differ from the wording above (e.g. "egocentric" for first-person video).""")
@@ -190,15 +199,14 @@ source_url must be the page with the recordings, or the page describing the plat
 }
 
 
-def public_source(spec: DataSpec, angle: str) -> list[Found]:
+def public_source(brief: Brief, angle: str) -> list[Found]:
     """(e) Organisations, not only companies, that publish this kind of data, from one angle."""
-    local = (f"\n\nAlso search in {', '.join(spec.languages)}: local bodies, platforms and "
-             "corpora are often only described in their own language.") if spec.languages else ""
+    local = (f"\n\nAlso search in {', '.join(brief.languages)}: local bodies, platforms and "
+             "corpora are often only described in their own language.") if brief.languages else ""
+    if brief.regions:
+        local += f"\n\nLook especially for public bodies and repositories in {', '.join(brief.regions)}."
     return _search(f"""Find organisations — not only companies — that hold or publish data
 similar to this:
-- data type: {spec.data_type}
-- scenarios: {", ".join(spec.scenarios) or "any"}
-- languages: {", ".join(spec.languages) or "any"}
-- labels: {", ".join(spec.label_types) or "none"}
+{_wanted(brief)}
 
-{PUBLIC_ANGLES[angle].format(data_type=spec.data_type)}{local}""")
+{PUBLIC_ANGLES[angle].format(data_type=brief.data_type)}{local}""")

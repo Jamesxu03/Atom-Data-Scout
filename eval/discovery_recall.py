@@ -1,8 +1,11 @@
-"""What share of the companies in eval/seed_companies.csv did discovery find, and via which channel?
+"""What share of the companies in eval/seed_companies.csv did discovery find, via which
+channel, and where did the ranking put them?
 
-Run: uv run python -m eval.discovery_recall [run_dir]   (defaults to the latest run)
+Run: uv run python -m eval.discovery_recall [session_dir]   (defaults to the newest session)
 
-Matches by domain; seeds with no website are matched by name.
+Matches by domain; seeds with no website are matched by name. Rank positions are in the
+session's ranked list (1 = top), so they show whether the known-good companies end up near
+the top.
 """
 
 import csv
@@ -10,16 +13,17 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import get_args
 
 from pydantic import BaseModel
 
-from worker import runs
+from worker import sessions
 from worker.discovery import Discovery
 from worker.discovery.domains import normalize_domain
-from worker.schemas import Candidate
+from worker.schemas import Candidate, Channel
+from worker.scoring import is_relevant, rank
 
 SEEDS_CSV = Path(__file__).parent / "seed_companies.csv"
-CHANNELS = ["product_search", "snowball", "directory", "marketplace", "public_source"]
 
 
 class Seed(BaseModel):
@@ -31,6 +35,7 @@ class Seed(BaseModel):
 class SeedMatch(BaseModel):
     seed: Seed
     candidate: Candidate | None
+    rank: int | None = None  # 1-based position in the ranked list
 
 
 def load_seeds(path: Path = SEEDS_CSV) -> list[Seed]:
@@ -45,16 +50,26 @@ def _norm_name(name: str) -> str:
 
 
 def match(seeds: list[Seed], candidates: list[Candidate]) -> list[SeedMatch]:
-    by_domain = {c.domain: c for c in candidates}
-    by_name = {_norm_name(c.name): c for c in candidates}
+    ranked = rank(candidates)
+    position = {c.domain: i for i, c in enumerate(ranked, 1)}
+    by_domain = {c.domain: c for c in ranked}
+    by_name = {_norm_name(c.name): c for c in ranked}
     out = []
     for s in seeds:
         domain = normalize_domain(s.website)
         c = by_domain.get(domain) if domain else None
         if c is None:
             c = by_name.get(_norm_name(s.name))
-        out.append(SeedMatch(seed=s, candidate=c))
+        out.append(SeedMatch(seed=s, candidate=c, rank=position[c.domain] if c else None))
     return out
+
+
+def _screen_outcome(c: Candidate) -> str:
+    if c.excluded:
+        return "excluded"
+    if c.fit is None:
+        return "unscored"
+    return "relevant" if is_relevant(c) else "below threshold"
 
 
 def report(seeds: list[Seed], d: Discovery) -> str:
@@ -66,15 +81,19 @@ def report(seeds: list[Seed], d: Discovery) -> str:
     pct = lambda k: f"{k}/{n} ({100 * k / n:.0f}%)"
 
     lines = [f"Discovery recall: {pct(len(found))} of seed companies found", "", "By channel:"]
-    for ch in CHANNELS:
+    for ch in get_args(Channel):
         k = sum(ch in m.candidate.channels for m in found)
         only = sum(m.candidate.channels == [ch] for m in found)
         lines.append(f"  {ch:15} {pct(k):>12}   only this channel: {only}")
 
-    labels = Counter(m.candidate.relevance or "unscreened" for m in found)
-    if any(k != "unscreened" for k in labels):
-        lines += ["", "Relevance screen on found seeds (no = wrongly dropped):"]
-        lines += [f"  {k:10} {v}" for k, v in labels.most_common()]
+    outcomes = Counter(_screen_outcome(m.candidate) for m in found)
+    lines += ["", "Screen on found seeds (excluded or below threshold = wrongly dropped):"]
+    lines += [f"  {k:16} {v}" for k, v in outcomes.most_common()]
+
+    ranks = sorted(m.rank for m in found)
+    if ranks:
+        lines += ["", (f"Rank of found seeds among {len(d.candidates)}: median {ranks[len(ranks) // 2]}, "
+                       f"top 10: {sum(r <= 10 for r in ranks)}, top 25: {sum(r <= 25 for r in ranks)}")]
 
     snowball_seeds = {_norm_name(h.seed) for h in d.hits if h.seed}
     leaked = [
@@ -88,16 +107,21 @@ def report(seeds: list[Seed], d: Discovery) -> str:
     missed = [m.seed for m in matches if not m.candidate]
     if missed:
         lines += ["", "Missed:"] + [f"  - {s.name} {s.website}".rstrip() for s in missed]
-    lines += ["", "Found:"] + [
-        f"  - {m.seed.name:30} {','.join(m.candidate.channels):35} {m.candidate.relevance or ''}"
-        for m in found
+    lines += ["", "Found (rank, fit):"] + [
+        f"  #{m.rank:<4} {m.seed.name:30} {m.candidate.fit if m.candidate.fit is not None else '?':<5} "
+        f"{','.join(m.candidate.channels)}"
+        for m in sorted(found, key=lambda m: m.rank)
     ]
     return "\n".join(lines)
 
 
 if __name__ == "__main__":
-    run_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else runs.latest_run()
-    if not (run_dir / "discovery.json").exists():
-        sys.exit(f"{run_dir} has no discovery.json — run discovery first (python -m worker.discovery).")
-    print(f"Run: {run_dir}\n")
-    print(report(load_seeds(), runs.load(run_dir, "discovery", Discovery)))
+    if len(sys.argv) > 1:
+        session_dir = Path(sys.argv[1])
+    elif all_sessions := sessions.list_all():
+        session_dir = all_sessions[0][0]
+    else:
+        sys.exit("No sessions yet — run a search in the app first.")
+    session = sessions.load(session_dir)
+    print(f"Session: {session_dir}\n")
+    print(report(load_seeds(), session.discovery))

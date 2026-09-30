@@ -1,16 +1,10 @@
-"""Step 4: DataSpec -> 5–10 HolderHypotheses (what kinds of business hold this data).
-
-Run: uv run python -m worker.steps.hypotheses [run_dir]   (defaults to latest run)
-"""
-
-import sys
-from pathlib import Path
+"""Brief -> 5–10 HolderHypotheses (what kinds of business hold this data)."""
 
 from pydantic import BaseModel, Field
 
-from worker import llm, runs
+from worker import llm
 from worker.config import HYPOTHESES_THINKING_LEVEL, MODEL
-from worker.schemas import DataSpec, HolderHypothesis
+from worker.schemas import Brief, HolderHypothesis
 
 
 class HypothesisList(BaseModel):
@@ -27,7 +21,8 @@ Think broadly:
 - Businesses whose product captures this data in normal operation (e.g. recording, hosting,
   transcribing, moderating, customer support).
 - Businesses whose staff or contractors produced it (e.g. labelling, research, outsourcing).
-- Companies anywhere in the world, not only in the buyer's country.
+- Companies anywhere in the world, not only in the buyer's country; where the buyer names
+  languages or regions, include businesses based in or serving them.
 - Niche or regional players, not just the famous ones.
 
 For each category:
@@ -50,21 +45,13 @@ How to write search_queries — this matters most:
 
 Order categories from most to least promising.
 
-Data specification:
-{spec}
+The buyer wants:
+{brief}
 """
 
 
-def hypotheses(spec: DataSpec) -> list[HolderHypothesis]:
-    prompt = PROMPT.format(spec=spec.model_dump_json(indent=2))
+def hypotheses(brief: Brief) -> list[HolderHypothesis]:
+    prompt = PROMPT.format(brief=brief.summary())
     result = llm.ask(prompt, HypothesisList, model=MODEL, thinking=HYPOTHESES_THINKING_LEVEL)
     return result.hypotheses
 
-
-if __name__ == "__main__":
-    run = Path(sys.argv[1]) if len(sys.argv) > 1 else runs.latest_run()
-    spec = runs.load(run, "spec", DataSpec)
-    hyps = HypothesisList(hypotheses=hypotheses(spec))
-    for i, h in enumerate(hyps.hypotheses, 1):
-        print(f"\n{i}. {h.category}\n   {h.rationale}\n   queries: {h.search_queries}")
-    print("\nsaved", runs.save(run, "hypotheses", hyps))

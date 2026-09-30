@@ -1,13 +1,11 @@
-"""Relevance screen: homepage + the page search found the company on, one Flash call per batch
--> yes / maybe / no, plus the holder type (vendor / public / by-product / technology /
-unrelated), who owns the data, and which of the buyer's languages it shows evidence for.
+"""Screen: homepage + the page search found the company on, one Flash call per batch -> the
+holder type (vendor / public / by-product / technology / unrelated), who owns the data, how
+well it matches the brief (1 to 5), evidence for the buyer's languages and regions, and signs
+of scale. Scores and fit are then computed in Python (see scoring.py).
 
-Rules the model doesn't apply reliably are enforced afterwards (see _apply): no evidence
-for the buyer's languages or a technology company caps "yes" at "maybe", and a "vendor"
-whose data belongs to its customers is a service, so a by-product holder.
-
-Only yes and maybe go on to the deep crawl.
-Run: uv run python -m worker.steps.screen [run_dir]   (needs spec.json + discovery.json)
+Rules the model doesn't apply reliably are enforced afterwards (see _apply): only the
+buyer's languages and regions count, and a "vendor" whose data belongs to its customers is a
+service, so a by-product holder. Unrelated companies and dead websites are excluded.
 """
 
 import socket
@@ -30,16 +28,19 @@ from worker.crawl import fetch_homepage_text, fetch_html_quick, same_site
 from worker.discovery.channels import GROUNDING_REDIRECT, mention_at
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
-from worker.schemas import Candidate, DataOwner, DataSpec, HolderType, Relevance
+from worker.schemas import Brief, Candidate, DataOwner, HolderType, Scores
+from worker.scoring import clamp, rescore
 
 
 class ScreenItem(BaseModel):
     domain: str
     holder_type: HolderType
     data_owner: DataOwner = Field(description="Who controls the data this company holds")
+    data_match: int = Field(description="1 to 5: how closely its data matches the buyer's")
     languages: list[str] = Field(description="The buyer's languages it shows evidence of working in")
-    label: Relevance
-    reason: str = Field(description="One line explaining the label")
+    regions: list[str] = Field(description="The buyer's regions it shows evidence of working in")
+    volume_signal: int | None = Field(description="1 to 5 from signs of scale; null if none")
+    reason: str = Field(description="One line: what data it holds and why it matches or not")
 
 
 class ScreenBatch(BaseModel):
@@ -48,9 +49,12 @@ class ScreenBatch(BaseModel):
 
 PROMPT = """You are screening companies for a data buyer. The buyer wants:
 - data type: {data_type}
+- features: {features}
 - languages: {languages}
+- regions: {regions}
 - scenarios: {scenarios}
 - labels: {labels}
+- volume: {volume}
 
 Below are excerpts from several organisations' homepages and, when it's another page, from
 the page a web search found them on. Read both: the source page often shows the line of
@@ -59,7 +63,8 @@ company's speech-data collection service). Claims on another site's page are wea
 the organisation's own pages.
 
 For each one, decide what kind of holder it is with respect to this data, who owns the data
-it holds, which of the buyer's languages it works in, and whether the buyer should contact it.
+it holds, how well its data matches, which of the buyer's languages and regions it works in,
+and how much data it is likely to hold.
 
 holder_type:
 - "vendor": sells or licenses this kind of data that it owns, or collects it to order as its
@@ -85,20 +90,29 @@ data_owner:
   need their permission.
 - "unclear": can't tell from these pages.
 
+data_match (1 to 5):
+- 5: its core business clearly involves this kind of data, with the buyer's features and
+  scenarios (e.g. multi-speaker meetings, not single-speaker dictation).
+- 4: clearly this kind of data, but only some of the features or scenarios.
+- 3: adjacent data (e.g. phone calls when the buyer wants meetings), or plausible but
+  unclear from these pages.
+- 2: a small side line, or a technology company that may hold some internal data.
+- 1: a different kind of data, or none.
+
 languages: which of the buyer's languages the organisation shows evidence of working in: its
 pages are written in the language, it names the language as supported or offered, it is
 based in or serves a country where the language is spoken, or it holds data in it. A
 generic claim like "100+ languages" is not evidence. Use the buyer's spelling; an empty
 list if there's no evidence or the buyer named no languages.
 
-label:
-- "yes": a vendor, public or by-product holder whose core product, service or collection
-  clearly involves this kind of data and, if the buyer named languages, with evidence for
-  at least one of them.
-- "maybe": plausible but unclear from these pages (e.g. an adjacent product, or too little
-  text), a technology company that may hold internal data, or a match with no evidence for
-  the buyer's languages; say which data in the reason.
-- "no": unrelated.
+regions: which of the buyer's regions the organisation shows evidence of working in: based
+there, offices or customers there, or data recorded there. Use the buyer's spelling; an
+empty list if there's no evidence or the buyer named no regions.
+
+volume_signal (1 to 5, or null): signs of scale on these pages, such as customer or user
+counts, hours or calls processed, or a stated dataset size, judged against the buyer's
+volume. 5: clearly far more than the buyer needs; 3: substantial; 1: tiny. null if the
+pages give no sign of scale.
 
 Return one result per organisation, using the domain exactly as given, with a one-line reason.
 
@@ -137,41 +151,49 @@ def source_excerpt(c: Candidate, fetch: Callable[[str], str] = fetch_html_quick)
     return None
 
 
-def _label_batch(spec: DataSpec, batch: list[Fetched]) -> dict[str, ScreenItem]:
+def _screen_batch(brief: Brief, batch: list[Fetched]) -> dict[str, ScreenItem]:
     companies = "\n\n".join(
         f"### {c.domain} ({c.name})\nHomepage:\n{home[:SCREEN_TEXT_CHARS]}" + (f"\n\n{src}" if src else "")
         for c, home, src in batch
     )
     prompt = PROMPT.format(
-        data_type=spec.data_type,
-        languages=", ".join(spec.languages) or "any",
-        scenarios=", ".join(spec.scenarios) or "any",
-        labels=", ".join(spec.label_types) or "none",
+        data_type=brief.data_type,
+        features=", ".join(brief.features) or "any",
+        languages=", ".join(brief.languages) or "any",
+        regions=", ".join(brief.regions) or "any",
+        scenarios=", ".join(brief.scenarios) or "any",
+        labels=", ".join(brief.label_types) or "none",
+        volume=str(brief.volume) or "not stated",
         companies=companies,
     )
     result = llm.ask(prompt, ScreenBatch, model=MODEL)
     return {item.domain.lower(): item for item in result.results}
 
 
-def _apply(spec: DataSpec, c: Candidate, item: ScreenItem) -> None:
-    """Copy the model's labels onto the candidate, then enforce the rules it applies unevenly."""
-    said = {lang.strip().lower() for lang in item.languages}
-    c.relevance, c.relevance_reason = item.label, item.reason
+def _buyers(wanted: list[str], said: list[str]) -> list[str]:
+    """The buyer's values the model reported, in the buyer's spelling."""
+    said = {x.strip().lower() for x in said}
+    return [w for w in wanted if w.lower() in said]
+
+
+def _apply(brief: Brief, c: Candidate, item: ScreenItem) -> None:
+    """Copy the model's answer onto the candidate, enforce the rules it applies unevenly, then
+    score it."""
+    c.reason = item.reason
     c.holder_type, c.data_owner = item.holder_type, item.data_owner
-    c.languages = [lang for lang in spec.languages if lang.lower() in said]  # buyer's spelling
+    c.languages = _buyers(brief.languages, item.languages)
+    c.regions = _buyers(brief.regions, item.regions)
     if c.holder_type == "vendor" and c.data_owner == "customers":
         c.holder_type = "by_product"  # works on its clients' data: a service, not a data seller
-    if c.relevance == "yes" and c.holder_type == "technology":
-        c.relevance = "maybe"  # sells tools, not footage: worth a question at most
-    if c.relevance == "yes" and spec.languages and not c.languages:
-        c.relevance = "maybe"
-        c.relevance_reason = f"{c.relevance_reason} (no evidence of the buyer's languages)"
+    c.excluded = c.holder_type == "unrelated"
+    c.scores = Scores(data_match=clamp(item.data_match), volume=clamp(item.volume_signal))
+    rescore(c, brief)
 
 
 def is_dead_site(e: Exception) -> bool:
     """The domain doesn't exist (DNS lookup failed) or the URL is invalid: usually a website the
     model made up. Refused/reset connections, TLS errors, 403s and timeouts are different —
-    real companies do those to crawlers — so they stay "maybe"."""
+    real companies do those to crawlers — so they are kept, unscored."""
     if isinstance(e, (httpx.UnsupportedProtocol, httpx.InvalidURL)):
         return True
     while e is not None:
@@ -182,18 +204,18 @@ def is_dead_site(e: Exception) -> bool:
 
 
 def screen(
-    spec: DataSpec,
+    brief: Brief,
     candidates: list[Candidate],
     fetch: Callable[[str], str] | None = None,
     progress: Callable[[str], None] = print,
     source: Callable[[Candidate], str | None] = source_excerpt,
 ) -> list[Candidate]:
-    """Label every candidate that has no relevance yet (in place) and return all of them.
+    """Screen and score every candidate not screened yet (in place) and return all of them.
 
-    Raises QuotaExceeded after saving the labels it did get.
+    Raises QuotaExceeded after keeping the results it did get.
     """
     fetch = fetch or fetch_homepage_text
-    todo = [c for c in candidates if c.relevance is None]
+    todo = [c for c in candidates if not c.screened]
     if not todo:
         return candidates
 
@@ -203,9 +225,9 @@ def screen(
             home = fetch(c.website)
         except Exception as e:
             if is_dead_site(e):
-                c.relevance, c.relevance_reason = "no", "dead website: domain doesn't exist"
-            else:  # can't judge without a homepage; keep it rather than lose a real company
-                c.relevance, c.relevance_reason = "maybe", f"homepage unreachable ({type(e).__name__})"
+                c.reason, c.excluded = "dead website: domain doesn't exist", True
+            else:  # can't judge without a homepage; keep it (fit unknown) rather than lose it
+                c.reason = f"homepage unreachable ({type(e).__name__})"
             return None
         return c, home, source(c)
 
@@ -216,54 +238,20 @@ def screen(
     reachable = [f for c in todo if (f := fetched.get(c.domain)) and f[1]]
 
     batches = [reachable[i : i + SCREEN_BATCH_SIZE] for i in range(0, len(reachable), SCREEN_BATCH_SIZE)]
-    labelled = run_parallel(
+    screened = run_parallel(
         [(f"Screening {i * SCREEN_BATCH_SIZE + 1}–{i * SCREEN_BATCH_SIZE + len(b)} of {len(reachable)}",
-          lambda b=b: (b, _label_batch(spec, b))) for i, b in enumerate(batches)],
+          lambda b=b: (b, _screen_batch(brief, b))) for i, b in enumerate(batches)],
         PARALLEL_LLM_CALLS,
         progress,
     )
-    for _, (batch, labels) in labelled.results:
+    for _, (batch, items) in screened.results:
         for c, _, _ in batch:
-            item = labels.get(c.domain)
+            item = items.get(c.domain)
             if item:
-                _apply(spec, c, item)
+                _apply(brief, c, item)
             else:
-                c.relevance, c.relevance_reason = "maybe", "not labelled by the model"
-    if labelled.quota_error:
-        raise QuotaExceeded(labelled.quota_error)
+                c.reason = "not screened by the model"
+    if screened.quota_error:
+        raise QuotaExceeded(screened.quota_error)
     return candidates
 
-
-RELEVANCE_ORDER = {"yes": 0, "maybe": 1, "no": 2, None: 3}
-HOLDER_ORDER = {"vendor": 0, "public": 1, "by_product": 2, "technology": 3, "unrelated": 4, None: 5}
-
-
-def rank(candidates: list[Candidate]) -> list[Candidate]:
-    """yes, maybe, no, unscreened; within each, vendors, public sources, by-product holders,
-    then technology.
-    Corroboration (more channels, hypotheses and sources) only breaks ties: it favours famous
-    companies, which are the least likely to sell their customers' data."""
-    return sorted(candidates, key=lambda c: (
-        RELEVANCE_ORDER[c.relevance], HOLDER_ORDER[c.holder_type], tuple(-int(x) for x in c.corroboration()),
-    ))
-
-
-def relevant(candidates: list[Candidate]) -> list[Candidate]:
-    """yes and maybe, ranked; no and unscreened dropped."""
-    return [c for c in rank(candidates) if c.relevance in ("yes", "maybe")]
-
-
-if __name__ == "__main__":
-    import sys
-    from pathlib import Path
-
-    from worker import runs
-    from worker.discovery import Discovery
-
-    run_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else runs.latest_run()
-    spec = runs.load(run_dir, "spec", DataSpec)
-    d = runs.load(run_dir, "discovery", Discovery)
-    screen(spec, d.candidates)
-    for c in d.candidates:
-        print(f"  {c.relevance:5} {c.holder_type or '-':10} {c.domain:30} {c.relevance_reason}")
-    print("saved", runs.save(run_dir, "discovery", d))

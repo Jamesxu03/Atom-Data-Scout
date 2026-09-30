@@ -7,3 +7,7 @@ toolbarMode = "minimal"
 
 [browser]
 gatherUsageStats = false
+
+[server]
+# No "Welcome to Streamlit" email sign-up prompt in the terminal on first run
+showEmailPrompt = false

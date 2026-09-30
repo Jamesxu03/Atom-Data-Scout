@@ -16,6 +16,13 @@ def no_network(monkeypatch):
     monkeypatch.setattr("worker.crawl._recent_failures", {})
 
 
+@pytest.fixture(autouse=True)
+def tmp_sessions(monkeypatch, tmp_path):
+    """Sessions are written under the test's temp folder, never data/sessions/."""
+    monkeypatch.setattr("worker.sessions.SESSIONS_DIR", tmp_path / "sessions")
+    return tmp_path / "sessions"
+
+
 @pytest.fixture
 def fake_ask(monkeypatch) -> FakeAsk:
     """Replace worker.llm.ask for the duration of a test."""

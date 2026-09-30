@@ -1,4 +1,4 @@
-"""Central settings: model, speed, limits, scoring weights."""
+"""Central settings: model, speed, limits, fit weights."""
 
 # Every Gemini call uses this model
 MODEL = "gemini-3.8-flash"
@@ -23,26 +23,27 @@ DISCOVERY = {
     "companies_per_call": 10,
 }
 
-# Snowball only from screened "yes" companies of these holder types. Technology providers
-# drift into "alternatives to <hardware>" pages full of unrelated device makers.
+# Snowball only from by-product holders with fit >= SEED_FIT and evidence for the brief's
+# languages or regions. Technology providers drift into "alternatives to <hardware>" pages
+# full of unrelated device makers.
 SNOWBALL_SEED_TYPES = ["by_product"]
 
 # Relevance screen: companies per Flash call
 SCREEN_BATCH_SIZE = 10
 SCREEN_TEXT_CHARS = 1500  # text sent per page (homepage, and the source page if it's another page)
 
-# Only this many relevant candidates go to the deep crawl — keep low while testing
-MAX_PROFILED = 5
+# Research: text sent per crawled page (homepage, privacy, terms)
+RESEARCH_TEXT_CHARS = 6000
 
-# Contacts step: one Gemini search call per profiled company (website contacts are free)
-FIND_CONTACTS = True
+# Contacts: at most this many from the search call (website contacts are free)
 CONTACTS_PER_COMPANY = 5
 
-# Weights must sum to 1.0
-SCORE_WEIGHTS = {
-    "data_match": 0.25,
-    "estimated_volume": 0.15,
-    "rights_clarity": 0.30,
-    "seller_motivation": 0.15,
-    "contactability": 0.15,
-}
+# Fit: weighted mean of the known scores (1 to 5). Weights of unknown scores are left out and
+# the rest rescaled, so an unknown neither helps nor hurts. Weights must sum to 1.0.
+FIT_WEIGHTS = {"data_match": 0.40, "coverage": 0.25, "licence": 0.20, "volume": 0.15}
+RELEVANT_FIT = 2.5  # shown by default and counted as relevant
+SEED_FIT = 3.5  # snowball seeds
+# Caps. The must-have cap sits below RELEVANT_FIT so such companies drop out of the default view.
+MUST_HAVE_CAP = 2.0  # a must-have language or region with no evidence
+TECHNOLOGY_CAP = 3.0
+INTERNAL_ONLY_CAP = 2.0  # research found the data is for internal use only

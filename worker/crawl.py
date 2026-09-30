@@ -267,13 +267,3 @@ def crawl(website: str) -> CrawlResult:
                 result.errors.append(f"{kind}: {type(e).__name__}: {e}")
     return result
 
-
-if __name__ == "__main__":
-    import sys
-
-    r = crawl(sys.argv[1] if len(sys.argv) > 1 else "https://otter.ai")
-    for kind in ("homepage", "privacy", "terms", "contact"):
-        p = getattr(r, kind)
-        print(f"{kind:9} {p.url if p else '-':60} {len(p.text) if p else 0:>7} chars")
-    for e in r.errors:
-        print("ERROR", e)

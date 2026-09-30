@@ -10,8 +10,9 @@ def _discovery():
         Hit(channel="marketplace", name="Acme Data Ltd", website="https://acmedata.io", source_url="s"),
     ]
     cands = merge(hits)
+    fits = {"otter.ai": 4.0, "fireflies.ai": 4.5, "acmedata.io": 1.2}
     for c in cands:
-        c.relevance = "no" if c.domain == "acmedata.io" else "yes"
+        c.reason, c.fit, c.excluded = "r", fits[c.domain], c.domain == "acmedata.io"
     return Discovery(hits=hits, candidates=cands)
 
 
@@ -36,7 +37,9 @@ def test_report():
     assert "snowball 1/4 (25%) only this channel: 1" in r
     assert "marketplace 1/4 (25%) only this channel: 1" in r
     assert "- Missing Co missing.com" in r
-    assert "no 1" in r  # screen wrongly dropped Acme
+    assert "excluded 1" in r and "relevant 2" in r  # screen wrongly dropped Acme
+    assert "Rank of found seeds among 3: median 2, top 10: 3" in r
+    assert "#1 Fireflies.ai 4.5" in r and "#2 Otter 4.0" in r
     assert "WARNING" in r and "Otter" in r  # Otter was a snowball seed
 
 

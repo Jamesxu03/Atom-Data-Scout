@@ -1,25 +1,32 @@
 """Discovery: search channels in parallel, check sources, merge and dedupe by domain.
 
-Two phases, so snowballing only starts from companies the relevance screen confirmed:
+Two phases, so snowballing only starts from companies the screen scored well:
   discover()       — (a) product search, (c) directories, (d) data vendors (marketplaces,
                      collection services, published datasets), (e) public sources (open
-                     corpora, public bodies that publish recordings)
-  snowball()       — (b) "alternatives to X" from explicit seeds + screened "yes" by-product
-                     holders, limited to competitors working in the buyer's languages
+                     corpora, public bodies that publish recordings). (d) and (e) are skipped
+                     when the brief doesn't accept vendors or public sources.
+  snowball()       — (b) "alternatives to X" from explicit seeds + well-scored by-product
+                     holders, limited to competitors working in the buyer's languages/regions
   check_sources()  — confirm source pages before screening, which reads them too
 
-Run: uv run python -m worker.discovery [run_dir]   (needs spec.json + hypotheses.json; phase 1 only)
+Domains in the brief's exclusions never become candidates.
 """
 
 from collections.abc import Callable
 
 from pydantic import BaseModel
 
-from worker.config import DISCOVERY, PARALLEL_FETCHES, PARALLEL_LLM_CALLS, SNOWBALL_SEED_TYPES
+from worker.config import (
+    DISCOVERY,
+    PARALLEL_FETCHES,
+    PARALLEL_LLM_CALLS,
+    SEED_FIT,
+    SNOWBALL_SEED_TYPES,
+)
 from worker.discovery import channels
-from worker.discovery.domains import is_aggregator, normalize_domain
+from worker.discovery.domains import is_aggregator, is_excluded, normalize_domain
 from worker.parallel import run_parallel
-from worker.schemas import Candidate, Channel, DataSpec, Found, HolderHypothesis
+from worker.schemas import Brief, Candidate, Channel, Found, HolderHypothesis
 
 Progress = Callable[[str], None]
 
@@ -40,27 +47,30 @@ class Hit(BaseModel):
 class Discovery(BaseModel):
     hits: list[Hit]
     candidates: list[Candidate]
+    exclusions: list[str] = []  # the brief's, kept so every later merge skips them too
     errors: list[str] = []
     partial: bool = False  # quota ran out before every channel call finished
 
 
-SCREENED_FIELDS = {"relevance", "relevance_reason", "holder_type", "data_owner", "languages", "contacts"}
+# Built from the hits on every merge; every other field is carried over from `previous`
+BUILT_BY_MERGE = {"name", "website", "domain", "channels", "source_urls", "hypotheses", "source_verified"}
 
 
-def merge(hits: list[Hit], previous: list[Candidate] = ()) -> list[Candidate]:
+def merge(hits: list[Hit], previous: list[Candidate] = (), exclusions: list[str] = ()) -> list[Candidate]:
     """Dedupe by domain, keeping every channel, source URL and hypothesis that found it.
 
-    Screening results and contacts already on `previous` candidates are carried over.
+    Everything else on `previous` candidates (screen, scores, research, contacts, email) is
+    carried over. Aggregators and excluded domains are skipped.
     """
     old = {c.domain: c for c in previous}
     by_domain: dict[str, Candidate] = {}
     for h in hits:
         domain = normalize_domain(h.website)
-        if not domain or is_aggregator(domain):
+        if not domain or is_aggregator(domain) or is_excluded(domain, exclusions):
             continue
         c = by_domain.get(domain)
         if c is None:
-            keep = old[domain].model_dump(include=SCREENED_FIELDS) if domain in old else {}
+            keep = old[domain].model_dump(exclude=BUILT_BY_MERGE) if domain in old else {}
             c = by_domain[domain] = Candidate(
                 name=h.name, website=h.website, domain=domain, channels=[], source_urls=[], **keep
             )
@@ -94,7 +104,7 @@ def check_sources(d: Discovery, domains: set[str], progress: Progress = print) -
                 found = Found(**h.model_dump(include={"name", "website", "source_url"}))
                 h.source_url, h.source_verified = channels.verify_source(found, pages[h.source_url])
             h.source_checked = True
-    return d.model_copy(update={"candidates": merge(d.hits, previous=d.candidates)})
+    return d.model_copy(update={"candidates": merge(d.hits, d.candidates, d.exclusions)})
 
 
 def _run_channels(tasks, progress: Progress) -> tuple[list[Hit], list[str], bool]:
@@ -106,8 +116,10 @@ def _run_channels(tasks, progress: Progress) -> tuple[list[Hit], list[str], bool
     return hits, errors, batch.quota_error is not None
 
 
-def discover(spec: DataSpec, hypotheses: list[HolderHypothesis], progress: Progress = print) -> Discovery:
+def discover(brief: Brief, hypotheses: list[HolderHypothesis], progress: Progress = print) -> Discovery:
     """Phase 1: product search, directories, data vendors and public sources, all calls in parallel."""
+    marketplace_calls = DISCOVERY["marketplace_calls"] if "vendor" in brief.holder_types else 0
+    public_calls = DISCOVERY["public_source_calls"] if "public" in brief.holder_types else 0
     tasks = [
         (f"(a) product search: {h.category}", lambda h=h: channels.product_search(h),
          {"channel": "product_search", "hypothesis": h.category})
@@ -117,64 +129,56 @@ def discover(spec: DataSpec, hypotheses: list[HolderHypothesis], progress: Progr
          {"channel": "directory", "hypothesis": h.category})
         for h in hypotheses[: DISCOVERY["directory_hypotheses"]]
     ] + [
-        (f"(d) data vendors: {angle}", lambda a=angle: channels.marketplace(spec, a), {"channel": "marketplace"})
-        for angle in list(channels.MARKETPLACE_ANGLES)[: DISCOVERY["marketplace_calls"]]
+        (f"(d) data vendors: {angle}", lambda a=angle: channels.marketplace(brief, a), {"channel": "marketplace"})
+        for angle in list(channels.MARKETPLACE_ANGLES)[:marketplace_calls]
     ] + [
-        (f"(e) public sources: {angle}", lambda a=angle: channels.public_source(spec, a),
+        (f"(e) public sources: {angle}", lambda a=angle: channels.public_source(brief, a),
          {"channel": "public_source"})
-        for angle in list(channels.PUBLIC_ANGLES)[: DISCOVERY["public_source_calls"]]
+        for angle in list(channels.PUBLIC_ANGLES)[:public_calls]
     ]
     hits, errors, partial = _run_channels(tasks, progress)
-    return Discovery(hits=hits, candidates=merge(hits), errors=errors, partial=partial)
+    return Discovery(hits=hits, candidates=merge(hits, exclusions=brief.exclusions),
+                     exclusions=brief.exclusions, errors=errors, partial=partial)
+
+
+def _good_seed(c: Candidate) -> bool:
+    """A well-scored by-product holder with evidence for the brief's languages or regions
+    (coverage None: the brief names neither)."""
+    return (
+        c.holder_type in SNOWBALL_SEED_TYPES and not c.excluded and (c.fit or 0) >= SEED_FIT
+        and (c.scores.coverage is None or c.scores.coverage >= 3)
+    )
 
 
 def pick_seeds(candidates: list[Candidate], explicit: list[tuple[str, str]] = ()) -> list[tuple[str, str]]:
-    """Explicit seeds first, then screened "yes" companies of SNOWBALL_SEED_TYPES,
-    best-corroborated first. "yes" already implies evidence for the buyer's languages."""
-    yes = sorted(
-        (c for c in candidates if c.relevance == "yes" and c.holder_type in SNOWBALL_SEED_TYPES),
-        key=Candidate.corroboration, reverse=True,
+    """Explicit seeds first, then good seeds by fit, best-corroborated first on ties."""
+    good = sorted(
+        (c for c in candidates if _good_seed(c)),
+        key=lambda c: (c.fit, c.corroboration()), reverse=True,
     )
     seen = {normalize_domain(w) for _, w in explicit}
-    auto = [(c.name, c.website) for c in yes if c.domain not in seen]
+    auto = [(c.name, c.website) for c in good if c.domain not in seen]
     return (list(explicit) + auto)[: DISCOVERY["snowball_seeds"]]
 
 
 def snowball(
-    d: Discovery, seeds: list[tuple[str, str]], languages: list[str] = (), progress: Progress = print
+    d: Discovery, seeds: list[tuple[str, str]], languages: list[str] = (), regions: list[str] = (),
+    progress: Progress = print,
 ) -> Discovery:
-    """Phase 2: competitors of the seeds that work in `languages` (any, if empty).
+    """Phase 2: competitors of the seeds that work in `languages` / `regions` (any, if empty).
     Returns a new Discovery with everything merged."""
     tasks = [
-        (f"(b) alternatives to {name}", lambda n=name, w=website: channels.snowball(n, w, languages),
+        (f"(b) alternatives to {name}",
+         lambda n=name, w=website: channels.snowball(n, w, languages, regions),
          {"channel": "snowball", "seed": name})
         for name, website in seeds
     ]
     hits, errors, partial = _run_channels(tasks, progress)
     all_hits = d.hits + hits
-    return Discovery(
-        hits=all_hits,
-        candidates=merge(all_hits, previous=d.candidates),
-        errors=d.errors + errors,
-        partial=d.partial or partial,
-    )
+    return d.model_copy(update={
+        "hits": all_hits,
+        "candidates": merge(all_hits, d.candidates, d.exclusions),
+        "errors": d.errors + errors,
+        "partial": d.partial or partial,
+    })
 
-
-if __name__ == "__main__":
-    import sys
-    from pathlib import Path
-
-    from worker import runs
-    from worker.steps.hypotheses import HypothesisList
-
-    run_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else runs.latest_run()
-    spec = runs.load(run_dir, "spec", DataSpec)
-    hyps = runs.load(run_dir, "hypotheses", HypothesisList).hypotheses
-    d = discover(spec, hyps)
-    d = check_sources(d, {c.domain for c in d.candidates})
-    print(f"\n{len(d.hits)} hits -> {len(d.candidates)} unique domains")
-    for c in d.candidates:
-        print(f"  {c.domain:30} {'✓' if c.source_verified else '?'} {','.join(c.channels)}")
-    for e in d.errors:
-        print("ERROR", e)
-    print("saved", runs.save(run_dir, "discovery", d))

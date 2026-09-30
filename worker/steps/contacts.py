@@ -1,4 +1,4 @@
-"""Contacts step: who to reach at each profiled company, and how.
+"""Contacts step: who to reach at each researched company, and how.
 
 Two sources:
 - website: emails and tel: links on the pages we already crawled (free, reliable)
@@ -19,9 +19,9 @@ from worker.config import CONTACTS_PER_COMPANY, MODEL, PARALLEL_FETCHES
 from worker.crawl import CrawlResult, fetch_html, fetch_html_quick
 from worker.discovery.domains import normalize_domain
 from worker.schemas import Candidate, Contact
+from worker.verify import TEL_RE, digits, email_on_page, name_on_page, phone_on_page, strip_code
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
-TEL_RE = re.compile(r'href=["\']tel:([^"\']+)["\']', re.I)
 JUNK_EMAIL = re.compile(
     r"\.(png|jpe?g|gif|svg|webp)$|@(example\.|sentry|wixpress|domain\.com|email\.com)", re.I
 )
@@ -90,7 +90,7 @@ def from_website(crawl: CrawlResult, html_for: Callable[[str], str] | None = Non
             html = html_for(page.url)
         except Exception:  # page came from cache during crawl; a miss here isn't worth failing on
             continue
-        html = _strip_code(html)  # emails inside scripts are config/tracking, not contacts
+        html = strip_code(html)  # emails inside scripts are config/tracking, not contacts
         for email in dict.fromkeys(e.lower() for e in EMAIL_RE.findall(html)):
             host = email.split("@")[1]
             if (host == company or host.endswith("." + company)) and not JUNK_EMAIL.search(email):
@@ -104,53 +104,15 @@ def from_website(crawl: CrawlResult, html_for: Callable[[str], str] | None = Non
     return out
 
 
-def _digits(s: str) -> str:
-    return re.sub(r"\D", "", s)
-
-
 def is_placeholder_phone(phone: str) -> bool:
     """Template numbers like +1234567890, 000-000-0000 or 555-5555 left in page markup."""
-    d = _digits(phone)
+    d = digits(phone)
     return (
         len(d) < 7
         or len(set(d)) <= 2
         or d.lstrip("0") in "1234567890" * 2
         or d.lstrip("1").startswith("5555")
     )
-
-
-def _strip_code(html: str) -> str:
-    return re.sub(r"<(script|style|noscript)\b.*?</\1\s*>", " ", html, flags=re.I | re.S)
-
-
-def _visible_text(html: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", _strip_code(html)))
-
-
-PHONE_IN_TEXT = re.compile(r"\+?\d[\d\s().-]{5,}\d")
-
-
-def _same_phone(a: str, b: str) -> bool:
-    """Same number, allowing for country-code / trunk-prefix formatting differences."""
-    da, db = _digits(a), _digits(b)
-    return len(da) >= 7 and len(db) >= 7 and da[-9:] == db[-9:]
-
-
-def email_on_page(email: str, html: str) -> bool:
-    """Whole-address match: an@acme.com does not match inside jean@acme.com."""
-    pattern = r"(?<![\w.%+-])" + re.escape(email) + r"(?![\w-]|\.[a-z0-9])"
-    return re.search(pattern, _strip_code(html), re.I) is not None
-
-
-def phone_on_page(phone: str, html: str) -> bool:
-    """Only in tel: links or visible text — never digits glued together from scripts or IDs."""
-    candidates = TEL_RE.findall(html) + PHONE_IN_TEXT.findall(_visible_text(html))
-    return any(_same_phone(phone, c) for c in candidates)
-
-
-def name_on_page(name: str, html: str) -> bool:
-    pattern = r"\b" + r"\s+".join(map(re.escape, name.split())) + r"\b"
-    return re.search(pattern, _visible_text(html), re.I) is not None
 
 
 def verify(c: Contact, html_for: Callable[[str], str] | None = None) -> bool:
@@ -187,7 +149,7 @@ def from_search(candidate: Candidate, verifier: Callable[[Contact], bool] | None
 
 
 def _key(c: Contact) -> str:
-    return (c.email or _digits(c.phone or "") or (c.name or "")).lower()
+    return (c.email or digits(c.phone or "") or (c.name or "")).lower()
 
 
 def _combine(a: Contact, b: Contact) -> Contact:
@@ -217,8 +179,5 @@ def merge_contacts(contacts: list[Contact]) -> list[Contact]:
     return sorted(by_key.values(), key=lambda c: (not c.verified, not c.name, not c.email))
 
 
-def find_contacts(candidate: Candidate, crawl: CrawlResult, use_search: bool = True) -> list[Contact]:
-    contacts = from_website(crawl)
-    if use_search:
-        contacts += from_search(candidate)
-    return merge_contacts(contacts)
+def find_contacts(candidate: Candidate, crawl: CrawlResult) -> list[Contact]:
+    return merge_contacts(from_website(crawl) + from_search(candidate))

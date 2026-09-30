@@ -1,14 +1,19 @@
-from worker.schemas import DataSpec, HolderHypothesis
+from worker.schemas import Brief, HolderHypothesis, Volume
 from worker.steps.hypotheses import HypothesisList, hypotheses
 
-SPEC = DataSpec(
+BRIEF = Brief(
     data_type="multi-speaker meeting audio",
-    languages=["English"],
+    features=["multi-speaker"],
     scenarios=["meetings"],
-    needs_labels=True,
+    languages=["English"],
+    regions=[],
     label_types=["transcript", "speaker labels"],
-    min_hours=1000,
-    licence_needed="training_only",
+    volume=Volume(amount=1000, unit="hours"),
+    formats=[],
+    licence="training_only",
+    holder_types=["vendor", "public", "by_product", "technology"],
+    exclusions=[],
+    must_have=[],
 )
 
 
@@ -19,10 +24,11 @@ def test_prompt_asks_for_product_language(fake_ask):
             for i in range(5)
         ]
     )
-    result = hypotheses(SPEC)
+    result = hypotheses(BRIEF)
 
     assert len(result) == 5
     (call,) = fake_ask.calls
-    assert "multi-speaker meeting audio" in call.prompt
+    assert "Multi-speaker meeting audio" in call.prompt
+    assert "Volume: at least 1,000 hours" in call.prompt  # the brief's summary
     assert "Never use dataset language" in call.prompt
     assert "in the words these companies use" in call.prompt

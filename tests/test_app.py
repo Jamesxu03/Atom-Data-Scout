@@ -1,46 +1,86 @@
-"""Streamlit page with pipeline.run stubbed out (no Gemini, no network)."""
+"""Streamlit page with the Gemini-backed steps stubbed out (no Gemini, no network)."""
 
 import time
 
 from streamlit.testing.v1 import AppTest
 
-from worker import pipeline
-from worker.schemas import Candidate, Contact, Funnel
+from tests.test_hypotheses import BRIEF
+from worker import pipeline, sessions
+from worker.discovery import Discovery, Hit
+from worker.schemas import (
+    BriefDraft,
+    Candidate,
+    Contact,
+    EmailDraft,
+    Evidence,
+    FieldOptions,
+    Research,
+    Scores,
+)
+from worker.steps import brief as brief_step
+from worker.steps import email as email_step
+
+OTTER_RESEARCH = Research(
+    data_held="customer meeting recordings", licence_status="needs_consent",
+    licence_evidence=[Evidence(quote="Customers own the recordings they make", url="https://otter.ai/terms")],
+    volume_estimate="millions of meetings", volume_score=5,
+    volume_evidence=[Evidence(quote="Over a billion meetings transcribed", url="https://otter.ai")],
+)
 
 
-def _fake_run(brief, progress=print, **_):
-    progress("Analyse brief")
-    time.sleep(0.2)
-    cands = [
-        Candidate(name="Otter", website="https://otter.ai", domain="otter.ai",
-                  channels=["product_search", "directory"], source_urls=["https://g2.com/x"],
-                  source_verified=True, relevance="yes", relevance_reason="AI notetaker",
-                  holder_type="by_product", data_owner="customers",
-                  contacts=[Contact(email="privacy@otter.ai", role="Privacy / DPO inbox",
-                                    source_url="https://otter.ai/privacy", origin="website", verified=True)]),
-        Candidate(name="Payroll Co", website="https://payroll.example", domain="payroll.example",
-                  channels=["product_search"], source_urls=[], relevance="no", relevance_reason="HR",
-                  holder_type="unrelated", data_owner="unclear"),
-        Candidate(name="EgoData", website="https://egodata.example", domain="egodata.example",
-                  channels=["marketplace"], source_urls=[], relevance="yes", relevance_reason="sells data",
-                  holder_type="vendor", data_owner="company"),
+def _candidates() -> list[Candidate]:
+    def cand(name, domain, **kw):
+        return Candidate(name=name, website=f"https://{domain}", domain=domain, channels=["product_search"],
+                         source_urls=[], **kw)
+
+    return [
+        cand("EgoData", "egodata.example", reason="sells data", holder_type="vendor", data_owner="company",
+             scores=Scores(data_match=5, coverage=5, licence=4), fit=4.8),
+        cand("Otter", "otter.ai", reason="AI notetaker", holder_type="by_product", data_owner="customers",
+             languages=["English"], scores=Scores(data_match=5, coverage=5, licence=2, volume=5), fit=4.0,
+             research=OTTER_RESEARCH,
+             contacts=[Contact(email="privacy@otter.ai", role="Privacy / DPO inbox",
+                               source_url="https://otter.ai/privacy", origin="website", verified=True)]),
+        cand("Lowfit", "lowfit.example", reason="adjacent", holder_type="by_product", data_owner="company",
+             scores=Scores(data_match=2, coverage=1, licence=3), fit=1.9),
+        cand("Down", "down.example", reason="homepage unreachable (ConnectError)"),
+        cand("Payroll Co", "payroll.example", reason="HR", holder_type="unrelated", data_owner="unclear",
+             scores=Scores(data_match=1), fit=1.0, excluded=True),
     ]
-    return pipeline.RunOutput(
-        funnel=Funnel(found=4, deduped=3, relevant=2, profiled=1, with_contacts=1),
-        candidates=cands, timings={"Analyse brief": 0.2, "total": 0.2},
-    )
 
 
-def test_run_from_page(monkeypatch):
-    monkeypatch.setattr(pipeline, "run", _fake_run)
+def _fake_search(session, progress=print, **_):
+    progress("Hypotheses")
+    time.sleep(0.2)
+    session.discovery = Discovery(
+        hits=[Hit(channel="product_search", name="x", website="https://x.com", source_url="s")] * 6,
+        candidates=_candidates())
+    session.meta.stage = "done"
+    session.meta.timings = {"Hypotheses": 0.2, "total": 0.2}
+    sessions.save(session)
+    return session
+
+
+def _button(at, label):
+    return next(b for b in at.button if b.label.startswith(label))
+
+
+def test_brief_form_search_and_one_ranked_table(monkeypatch):
+    monkeypatch.setattr(brief_step, "draft_brief", lambda text: BriefDraft(
+        brief=BRIEF, suggested=["regions"], options=[FieldOptions(field="languages", options=["Welsh"])],
+        questions=["Do accented speakers count?"]))
+    monkeypatch.setattr(pipeline, "search", _fake_search)
     at = AppTest.from_file("../app.py", default_timeout=30).run()
 
     assert at.title[0].value == "Atom Data Scout"
-    assert not at.toggle  # no demo switch
-    assert at.button[0].label == "Start search"
+    _button(at, "Refine brief").click().run()
+    assert not at.exception
+    assert "Do accented speakers count?" in at.info[0].value  # open questions above the form
+    languages = next(m for m in at.multiselect if m.label == "Languages")
+    assert languages.value == ["English"] and "Welsh" in languages.options
+    assert [c.value for c in at.caption].count("suggested") == 1
 
-    at.button[0].click().run()
-    assert at.button[0].label == "Running…" and at.button[0].disabled
+    _button(at, "Save and search").click().run()
     for _ in range(40):
         time.sleep(0.25)
         at.run()
@@ -49,12 +89,49 @@ def test_run_from_page(monkeypatch):
 
     assert not at.exception
     assert [(m.label, m.value) for m in at.metric] == [
-        ("Found", "4"), ("After dedupe", "3"), ("Relevant", "2"), ("Profiled", "1"), ("With contacts", "1"),
+        ("Found", "6"), ("Unique", "5"), ("Screened", "4"), ("Relevant", "2"), ("Researched", "1"),
+        ("With contacts", "1"),
     ]
-    # one table per holder type; "no" (the unrelated payroll company) hidden by default
-    groups = [m.value for m in at.markdown if m.value.startswith("**")]
-    assert groups == ["**Data vendors** (1)", "**By-product holders** (1)"]
-    assert list(at.dataframe[1].value["Company"]) == ["EgoData"]
-    assert list(at.dataframe[2].value["Company"]) == ["Otter"]
-    assert [h.value for h in at.subheader] == ["Candidates", "Contacts"]
-    assert at.button[0].label == "Start search"
+    assert "Multi-speaker meeting audio" in at.info[0].value  # the saved brief's summary
+    (table,) = [df for df in at.dataframe if "Fit" in df.value.columns]
+    # one table by fit: below-threshold and excluded hidden, unknown fit last
+    assert list(table.value["Company"]) == ["EgoData", "Otter", "Down"]
+    assert list(table.value["Fit"]) == ["4.8", "4.0", "?"]
+    assert list(table.value["Licence"])[:2] == ["prior: likely sellable", "checked: needs consent"]
+    research = _button(at, "Research selected")
+    assert research.label == "Research selected (0)" and research.disabled
+    assert any("not legal advice" in c.value for c in at.caption)
+
+    # the session is listed in the sidebar and reopens from disk
+    ((_, meta),) = sessions.list_all()
+    assert meta.relevant == 2 and meta.stage == "done"
+    assert any(b.label.startswith(f"**{meta.name}**") for b in at.sidebar.button)
+
+
+def test_reopen_session_research_panel_and_email(monkeypatch):
+    s = sessions.create("Meeting audio", BRIEF)
+    s.discovery = Discovery(hits=[], candidates=_candidates())
+    s.meta.stage = "done"
+    sessions.save(s)
+    monkeypatch.setattr(email_step, "draft_email", lambda brief, c, contact: EmailDraft(
+        to=contact.email, subject="Meeting recordings", body="Dear team, ..."))
+
+    at = AppTest.from_file("../app.py", default_timeout=30).run()
+    next(b for b in at.sidebar.button if b.label.startswith("**Meeting audio**")).click().run()
+    assert not at.exception
+    assert [e.label for e in at.expander if e.label.startswith("Otter")] == [
+        "Otter — fit 4.0 — licence needs consent"]
+    assert any("Customers own the recordings they make" in m.value for m in at.markdown)
+
+    _button(at, "Draft email").click().run()
+    assert not at.exception
+    assert at.text_input(key=f"subject-{s.path.name}-otter.ai").value == "Meeting recordings"
+    saved = sessions.load(s.path).discovery.candidates[1]
+    assert saved.email == EmailDraft(to="privacy@otter.ai", subject="Meeting recordings", body="Dear team, ...")
+
+    at.text_input(key=f"subject-{s.path.name}-otter.ai").input("Licensing meeting recordings").run()
+    assert sessions.load(s.path).discovery.candidates[1].email.subject == "Licensing meeting recordings"
+
+    _button(at, "New session from this brief").click().run()
+    assert next(m for m in at.multiselect if m.label == "Languages").value == ["English"]
+    assert at.text_input[0].value == "Meeting audio"

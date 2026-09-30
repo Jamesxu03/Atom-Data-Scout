@@ -3,14 +3,12 @@ from worker.schemas import Candidate, Contact
 from worker.steps.contacts import (
     FoundContact,
     FoundContacts,
-    email_on_page,
     from_search,
     from_website,
     merge_contacts,
-    name_on_page,
-    phone_on_page,
     verify,
 )
+from worker.verify import email_on_page, name_on_page, phone_on_page
 
 PRIVACY_HTML = """
 <p>Contact our DPO at <a href="mailto:DPO@acme.com">DPO@acme.com</a> or privacy@acme.com.</p>

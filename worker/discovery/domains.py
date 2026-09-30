@@ -28,3 +28,12 @@ def normalize_domain(url: str) -> str | None:
 
 def is_aggregator(domain: str) -> bool:
     return any(domain == d or domain.endswith("." + d) for d in AGGREGATOR_DOMAINS)
+
+
+def is_excluded(domain: str, exclusions: list[str]) -> bool:
+    """domain is one of the brief's exclusions (given as domains or URLs) or a subdomain of one."""
+    for ex in exclusions:
+        ex = normalize_domain(ex)
+        if ex and (domain == ex or domain.endswith("." + ex)):
+            return True
+    return False
