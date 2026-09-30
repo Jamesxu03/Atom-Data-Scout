@@ -1,7 +1,8 @@
 """Research step, for companies the user selects: what data they hold, how much, the licence
-(in the same labels as D1 "Acceptable licence", plus internal use only), and a check of each
-requirement the brief marks for research (V): quality evidence, demographics, recency,
-permitted use, personal data, documents and where the data can be processed.
+(in the same labels as D1 "Acceptable licence", plus internal use only), price and age (founding
+year, when the data was recorded), and a check of each requirement the brief marks for research
+(V): quality evidence, demographics, recency, permitted use, personal data, documents and where
+the data can be processed.
 
 One Gemini call with Google Search per company, given its crawled homepage, privacy policy and
 terms. Every quote the model returns must appear on the page it cites: crawled pages are matched
@@ -28,8 +29,8 @@ from worker.brief_template import (
 from worker.config import MODEL, RESEARCH_TEXT_CHARS
 from worker.crawl import CrawlResult, fetch_html_quick
 from worker.discovery.channels import resolve_source
-from worker.schemas import Candidate, Check, CheckedCategory, Evidence, Research
-from worker.verify import quote_in_text, quote_on_page
+from worker.schemas import FACTS, Candidate, Check, CheckedCategory, Evidence, Research
+from worker.verify import quote_in_text, quote_on_page, value_in_quote
 
 LICENCE_MEANINGS = {
     OPEN: "published as public domain or under an open licence with no conditions (CC0, open government data)",
@@ -66,10 +67,16 @@ Find out:
 4. checks: one per requirement below. verdict "meets" or "fails" only with a quote showing it,
    otherwise "unclear".
 {checks}
+5. price, founded, data_period, each with the quote and url that state it, or null:
+   - price: the published price of this data, with currency and unit (e.g. "$30 per audio
+     hour", a marketplace listing price), or "On request" if the company says so.
+   - founded: the year the company was founded.
+   - data_period: when the matching data was recorded or collected, e.g. "2018 to 2024".
 
 Evidence rules (quotes that break them are thrown away):
 - Every licence other than "{unclear}", every volume_estimate, and every "meets" or "fails"
-  verdict needs quotes.
+  verdict needs quotes. Every price, founded and data_period needs a quote containing its
+  numbers.
 - quote: copied word for word from the page, at least one full sentence. No paraphrase, no
   joining of separate passages.
 - url: the page the quote is on: one of the excerpt URLs below, or a page you found in search.
@@ -142,6 +149,10 @@ def verify_research(r: Research, crawl: CrawlResult, fetch: Callable[[str], str]
         verdict = ch.verdict if evidence else "unclear"
         checks.append(Check(category=ch.category, verdict=verdict, finding=ch.finding, evidence=evidence))
     update["checks"] = list({ch.category: ch for ch in checks}.values())  # one per category
+    for key in FACTS:
+        f = getattr(r, key)
+        kept = verify_evidence([f], crawl, fetch) if f and value_in_quote(f.value, f.quote) else []
+        update[key] = kept[0] if kept else None
     return r.model_copy(update=update)
 
 

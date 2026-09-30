@@ -19,6 +19,24 @@ class Evidence(BaseModel):
     url: str = Field(description="URL the quote was taken from")
 
 
+class Fact(Evidence):
+    """A value a page states, kept only with the words that state it."""
+
+    value: str = Field(description="Short value, e.g. '$30 per audio hour', 'On request', '2014', '2018 to 2024'")
+
+
+class Facts(BaseModel):
+    """Price and age, when a page states them. The screen fills these on the candidate from the
+    pages it reads; research fills them again with Google Search, and its values win."""
+
+    price: Fact | None = Field(default=None, description="Published price of this data, or 'On request'")
+    founded: Fact | None = Field(default=None, description="Year the company was founded")
+    data_period: Fact | None = Field(default=None, description="When the data was recorded, e.g. '2018 to 2024'")
+
+
+FACTS = tuple(Facts.model_fields)
+
+
 # vendor: sells data it owns or collects it to order; public: a public body, research institute
 # or repository that publishes it (corpora, parliament recordings); by_product: its product or
 # service captures it in normal operation; technology: makes tools or hardware for it but
@@ -95,7 +113,7 @@ _OLD_STATUS = {"sellable": COMMERCIAL, "open": OPEN, "open_restricted": RESTRICT
                "needs_consent": UNCLEAR, "internal_only": INTERNAL_ONLY, "unknown": UNCLEAR}
 
 
-class Research(BaseModel):
+class Research(Facts):
     """What checking one company in depth found. Every claim carries a verified quote."""
 
     data_held: str = Field(description="What data they hold: kind, formats, labels")
@@ -120,9 +138,9 @@ class EmailDraft(BaseModel):
     body: str
 
 
-class Candidate(BaseModel):
+class Candidate(Facts):
     """A company found by discovery, merged across channels by domain. Holds everything known
-    about it: screen, scores, research, contacts and email."""
+    about it: screen, scores, facts, research, contacts and email."""
 
     name: str
     website: str
@@ -151,6 +169,10 @@ class Candidate(BaseModel):
     @property
     def screened(self) -> bool:
         return self.reason is not None
+
+    def fact(self, key: str) -> Fact | None:
+        """Research's value when it found one, otherwise the screen's."""
+        return (self.research and getattr(self.research, key)) or getattr(self, key)
 
     def corroboration(self) -> tuple[int, int, bool, int]:
         """How well-supported this candidate is; only a tiebreaker after fit."""

@@ -70,3 +70,14 @@ def quote_in_text(quote: str, text: str) -> bool:
 
 def quote_on_page(quote: str, html: str) -> bool:
     return quote_in_text(quote, html_lib.unescape(visible_text(html)))
+
+
+def _numbers(s: str) -> set[str]:
+    """'$1,250.50 from 2018' -> {'125050', '2018'}: thousands separators and decimals ignored."""
+    return {re.sub(r"[.,]", "", n) for n in re.findall(r"\d(?:[\d.,]*\d)?", s)}
+
+
+def value_in_quote(value: str, quote: str) -> bool:
+    """Every number in the value (a price, a year) is also in the quote, so the quote backs the
+    value rather than just sitting on the same page."""
+    return _numbers(value) <= _numbers(quote)

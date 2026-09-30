@@ -27,6 +27,9 @@ Initial brief → Refine (form with options) → Final brief
 2. **Search.** Runs in the background. Each company's homepage (and the page it was found on)
    is screened for holder type, data owner, how well the data matches (1 to 5), evidence for the
    brief's languages and regions, signs of scale, and any must-have it clearly contradicts.
+   It also reads any price, founding year and data period the pages state, kept only when the
+   quote is on the page and contains the value's numbers (*Price*, *Data years* and *Founded*
+   columns; *?* when not published).
    Only the channels for the source types picked (E1) run; must-have filters (E1, D6) drop
    companies of other types, and exclusions (E2) are skipped.
 3. **Ranking.** Fit is a weighted mean of four 1-to-5 scores (see `worker/scoring.py`):
@@ -34,11 +37,14 @@ Initial brief → Refine (form with options) → Final brief
    are left out and the weights rescaled; categories set to Any count for nothing. Fit is capped
    at 2.0 when the evidence contradicts a must-have (the *Must-haves not met* column says which),
    at 3.0 for technology companies, and at 2.0 when research finds the data is for internal use
-   only. Before research, the licence score is a prior based on holder type and D6.
+   only. Before research, the licence score is a prior based on holder type and D6. The table
+   filters by minimum fit, type, languages (evidence for at least one picked) and minimum volume
+   score; companies with unknown volume stay unless *Known volume* is on.
 4. **Research.** Tick rows in the table and click *Research selected*. For each company this
    deep-crawls the homepage, privacy policy and terms, then makes one Gemini + Google Search call
    for what data it holds, how much, its licence (in the same labels as D1, plus *Internal use
-   only*), and a check of each research (V) requirement: quality evidence, demographics, recency,
+   only*), its price, founding year and data period, and a check of each research (V)
+   requirement: quality evidence, demographics, recency,
    permitted use, personal data, documents, processing location. One more call finds contacts.
    Every quote must appear on the page it cites, or it is dropped (and a licence or check left
    with no quote becomes *Unclear*). The licence and volume scores are then replaced and the list is ranked
