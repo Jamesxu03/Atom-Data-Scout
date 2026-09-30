@@ -22,7 +22,7 @@ from worker.crawl import CrawlResult, crawl
 from worker.discovery import Discovery, check_sources, discover, pick_seeds, snowball
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
-from worker.schemas import Candidate, Funnel
+from worker.schemas import FACTS, Candidate, Funnel
 from worker.scoring import is_relevant, must_failures, rank, rescore
 from worker.sessions import Session
 from worker.steps.contacts import find_contacts
@@ -183,12 +183,13 @@ def candidates_csv(candidates: list[Candidate], brief: Brief) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["name", "domain", "website", "fit", "holder_type", "data_owner", "data_match", "coverage",
-                "volume", "licence", "licence_found", "must_haves_not_met", "languages", "regions", "reason", "excluded",
-                "channels", "source_verified", "source_urls"])
+                "volume", "licence", "licence_found", *FACTS, "must_haves_not_met", "languages", "regions", "reason",
+                "excluded", "channels", "source_verified", "source_urls"])
     for c in candidates:
         s = c.scores
         w.writerow([c.name, c.domain, c.website, c.fit, c.holder_type, c.data_owner, s.data_match, s.coverage,
                     s.volume, s.licence, c.research.licence if c.research else None,
+                    *((f.value if (f := c.fact(k)) else None) for k in FACTS),
                     ", ".join(must_failures(c, brief)),
                     ", ".join(c.languages), ", ".join(c.regions), c.reason, c.excluded,
                     " ".join(c.channels), c.source_verified, " ".join(c.source_urls)])

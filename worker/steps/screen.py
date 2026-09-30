@@ -1,7 +1,8 @@
 """Screen: homepage + the page search found the company on, one Flash call per batch -> the
 holder type (vendor / public / by-product / technology / unrelated), who owns the data, how
-well it matches the brief (1 to 5), evidence for the buyer's languages and regions, and signs
-of scale. Scores and fit are then computed in Python (see scoring.py).
+well it matches the brief (1 to 5), evidence for the buyer's languages and regions, signs
+of scale, and any price, founding year or data period the pages state (kept only with a quote
+found on the page). Scores and fit are then computed in Python (see scoring.py).
 
 Rules the model doesn't apply reliably are enforced afterwards (see _apply): only the
 buyer's languages and regions count, only must-have categories can be contradicted, and a
@@ -10,6 +11,7 @@ companies, dead websites and companies a must-have filter rules out (E1 source t
 customers' data) are excluded.
 """
 
+import re
 import socket
 from collections.abc import Callable
 from urllib.parse import urlparse
@@ -31,8 +33,14 @@ from worker.crawl import fetch_homepage_text, fetch_html_quick, same_site
 from worker.discovery.channels import GROUNDING_REDIRECT, mention_at
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
-from worker.schemas import Candidate, DataOwner, HolderType, Scores
+from worker.schemas import FACTS, Candidate, DataOwner, Fact, HolderType, Scores
 from worker.scoring import rescore
+from worker.verify import quote_in_text, value_in_quote
+
+
+class Stated(BaseModel):
+    value: str
+    quote: str = Field(description="The sentence on these pages that states it, word for word")
 
 
 class ScreenItem(BaseModel):
@@ -44,6 +52,9 @@ class ScreenItem(BaseModel):
     regions: list[str] = Field(description="The buyer's regions it shows evidence of working in")
     volume_signal: int | None = Field(description="1 to 5 from signs of scale; null if none")
     contradicts: list[str] = Field(default=[], description="Keys of must-have requirements these pages clearly contradict")
+    price: Stated | None = None
+    founded: Stated | None = None
+    data_period: Stated | None = None
     reason: str = Field(description="One line: what data it holds and why it matches or not")
 
 
@@ -123,6 +134,14 @@ contradicts: keys from the must-have list that these pages clearly contradict, e
 "modality" for a company that only handles text when audio is a must-have. Leave it empty
 when the pages just don't say.
 
+price, founded, data_period: only when these pages state them; otherwise null.
+- price: the price of this data, with currency and unit (e.g. "$30 per audio hour"), or
+  "On request" if the pages say pricing is on request.
+- founded: the year the organisation was founded.
+- data_period: when its data was recorded or collected, e.g. "2018 to 2024" or "since 2015".
+value is the short answer; quote is the sentence that states it, copied word for word from
+these pages. Answers whose quote is not on the pages are thrown away.
+
 Return one result per organisation, using the domain exactly as given, with a one-line reason.
 
 {companies}
@@ -189,13 +208,31 @@ def _buyers(wanted: list[str], said: list[str]) -> list[str]:
     return [w for w in wanted if w.lower() in said]
 
 
-def _apply(brief: Brief, c: Candidate, item: ScreenItem) -> None:
+_EXCERPT_URL = re.compile(r"Source page on [^(]+\((\S+)\)")  # the header source_excerpt writes
+
+
+def _stated_facts(c: Candidate, item: ScreenItem, home: str, src: str | None) -> None:
+    """Keep the price and age the model read only when its quote is on one of the pages and
+    contains the value's numbers."""
+    pages = [(c.website, home)]
+    if src:
+        pages.append(((m := _EXCERPT_URL.match(src)) and m.group(1) or c.website, src))
+    for key in FACTS:
+        s = getattr(item, key)
+        if not s or not value_in_quote(s.value, s.quote):
+            continue
+        if url := next((u for u, text in pages if quote_in_text(s.quote, text)), None):
+            setattr(c, key, Fact(value=s.value, quote=s.quote, url=url))
+
+
+def _apply(brief: Brief, c: Candidate, item: ScreenItem, home: str = "", src: str | None = None) -> None:
     """Copy the model's answer onto the candidate, enforce the rules it applies unevenly, then
     score it."""
     c.reason = item.reason
     c.holder_type, c.data_owner = item.holder_type, item.data_owner
     c.languages = _buyers(brief.languages, item.languages)
     c.regions = _buyers(brief.regions, item.regions)
+    _stated_facts(c, item, home, src)
     c.contradicts = [k for k in dict.fromkeys(item.contradicts) if k in CATEGORIES and brief.must(k)]
     if c.holder_type == "vendor" and c.data_owner == "customers":
         c.holder_type = "by_product"  # works on its clients' data: a service, not a data seller
@@ -264,10 +301,10 @@ def screen(
         progress,
     )
     for _, (batch, items) in screened.results:
-        for c, _, _ in batch:
+        for c, home, src in batch:
             item = items.get(c.domain)
             if item:
-                _apply(brief, c, item)
+                _apply(brief, c, item, home, src)
             else:
                 c.reason = "not screened by the model"
     if screened.quota_error:

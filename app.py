@@ -9,10 +9,12 @@ Searches and research run in a background thread, so touching the page doesn't r
 interrupt them; a fragment polls for progress once a second.
 """
 
+import re
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -42,10 +44,13 @@ EXAMPLE_BRIEF = (
     "with transcripts and speaker labels, at least 1,000 hours, licensed for model training."
 )
 LOGO = "assets/atom_logo.png"
+ICON = "assets/atom_icon.png"  # square: a wide logo gets squeezed into the browser tab's favicon
 HOLDER_LABELS = {"vendor": "Vendor", "public": "Public", "by_product": "By-product",
                  "technology": "Technology", "unrelated": "Unrelated", None: "Unknown"}
 VERDICT_ICONS = {"meets": "✅", "fails": "❌", "unclear": "❔"}
 LEGAL_NOTE = "Licence status is a screening flag from public pages, not legal advice."
+FACT_LABELS = {"price": "Price", "data_period": "Data years", "founded": "Founded"}
+FACT_HELP = "Only when a page states it; the quote is checked on the page. Research looks again with Google Search."
 
 
 # --- background jobs --------------------------------------------------------------------------
@@ -269,6 +274,15 @@ def fmt(x: float | None) -> str:
     return "?" if x is None else f"{x:.1f}" if isinstance(x, float) else str(x)
 
 
+def fact_text(c: Candidate, key: str) -> str:
+    """The stated value, with the company's age added to a founding year."""
+    if not (f := c.fact(key)):
+        return "?"
+    if key == "founded" and (year := re.search(r"\b(1[89]\d\d|20\d\d)\b", f.value)):
+        return f"{year[1]} ({date.today().year - int(year[1])} years)"
+    return f.value
+
+
 def licence_label(c: Candidate) -> str:
     if c.research:
         return f"checked: {c.research.licence}"
@@ -351,12 +365,26 @@ def candidates_table(s: sessions.Session, path: str) -> None:
     types = mid.multiselect("Type", present, default=present, format_func=HOLDER_LABELS.get, key=f"types-{key}")
     show_excluded = right.toggle("Show excluded", key=f"excluded-{key}",
                                  help="Unrelated companies, dead websites, and ones a must-have filter rules out")
+    min_volume = left.select_slider(
+        "Minimum volume", [1, 2, 3, 4, 5], 1, key=f"volume-{key}",
+        format_func=lambda v: "Any" if v == 1 else f"{v} or more",
+        help="Volume score, 1 to 5 against the volume wanted from one seller")
+    languages = mid.multiselect(
+        "Languages", s.brief.languages, key=f"languages-{key}", placeholder="Any",
+        help="Only companies with evidence for at least one of these") if s.brief.languages else []
+    hide_unknown = right.toggle("Known volume", key=f"unknown-volume-{key}",
+                                help="Only companies whose volume is known. Most stay unknown until researched.")
 
-    rows = [
-        c for c in s.discovery.candidates
-        if (not c.excluded and c.holder_type in types and (c.fit is None or c.fit >= min_fit))
-        or (c.excluded and show_excluded)
-    ]
+    def shown(c: Candidate) -> bool:
+        if c.excluded:
+            return show_excluded
+        volume = c.scores.volume
+        return (c.holder_type in types
+                and (c.fit is None or c.fit >= min_fit)
+                and (not languages or any(lang in c.languages for lang in languages))
+                and (volume >= min_volume if volume is not None else not hide_unknown))
+
+    rows = [c for c in s.discovery.candidates if shown(c)]
     if not rows:
         st.caption("No candidates match these filters.")
         return
@@ -370,6 +398,7 @@ def candidates_table(s: sessions.Session, path: str) -> None:
                 "Data match": fmt(c.scores.data_match),
                 "Coverage": fmt(c.scores.coverage),
                 "Volume": fmt(c.scores.volume),
+                **{label: fact_text(c, k) for k, label in FACT_LABELS.items()},
                 "Languages and regions": ", ".join(c.languages + c.regions),
                 "Reason": c.reason,
                 "Must-haves not met": ", ".join(CATEGORIES[k].label for k in must_failures(c, s.brief)),
@@ -389,6 +418,9 @@ def candidates_table(s: sessions.Session, path: str) -> None:
             "Licence": st.column_config.TextColumn(
                 help="prior: a guess from the holder type until research checks it. " + LEGAL_NOTE),
             "Coverage": st.column_config.TextColumn(help="Evidence for the brief's languages and regions"),
+            "Price": st.column_config.TextColumn(help=f"Published price of the data. {FACT_HELP}"),
+            "Data years": st.column_config.TextColumn(help=f"When the data was recorded. {FACT_HELP}"),
+            "Founded": st.column_config.TextColumn(help=f"Year the company was founded, and its age. {FACT_HELP}"),
             "Must-haves not met": st.column_config.TextColumn(
                 help="Must-have categories the evidence contradicts; each caps the fit"),
             "Website": st.column_config.LinkColumn(),
@@ -432,6 +464,9 @@ def researched(s: sessions.Session, path: str, locked: bool) -> None:
             st.markdown(f"**Volume:** {r.volume_estimate or 'unknown'}")
             for ev in r.volume_evidence:
                 st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
+            for k, label in FACT_LABELS.items():
+                if f := c.fact(k):
+                    st.markdown(f"**{label}:** {fact_text(c, k)}\n\n> {f.quote}\n\n[{f.url}]({f.url})")
             st.markdown(f"**Data held:** {r.data_held}")
             if r.checks:
                 st.markdown("**Checks against the brief**")
@@ -512,8 +547,8 @@ def email_section(s: sessions.Session, c: Candidate, path: str, locked: bool) ->
 
 # --- page -------------------------------------------------------------------------------------
 
-st.set_page_config(page_title="Atom Data Scout", page_icon=LOGO, layout="wide")
-st.logo(LOGO, size="large")
+st.set_page_config(page_title="Atom Data Scout", page_icon=ICON, layout="wide")
+st.logo(LOGO, size="large", icon_image=ICON)
 st.title("Atom Data Scout")
 sidebar()
 

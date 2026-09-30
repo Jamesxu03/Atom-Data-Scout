@@ -1,9 +1,9 @@
 from tests.test_hypotheses import brief_with
 from worker.brief_template import COMMERCIAL, INTERNAL_ONLY, UNCLEAR, Pick
 from worker.crawl import CrawlResult, Page
-from worker.schemas import Candidate, Check, Evidence, Research
+from worker.schemas import Candidate, Check, Evidence, Fact, Research
 from worker.steps.research import research, verify_research
-from worker.verify import quote_in_text, quote_on_page
+from worker.verify import quote_in_text, quote_on_page, value_in_quote
 
 POLICY = ("We record support calls for quality and training purposes. Recordings are used only "
           "internally and are never shared with or sold to third parties.")
@@ -83,3 +83,36 @@ def test_research_prompt_and_search(fake_ask):
     assert "- processing: Where the buyer will process it: UK" in call.prompt and "PDPL" in call.prompt
     assert "one seller should hold 10% of it" in call.prompt
     assert "- speakers" not in call.prompt  # not a research check
+
+
+def test_price_and_age_need_a_verified_quote_containing_their_numbers():
+    crawl = _crawl()
+    crawl.homepage = Page(url="https://acme.com", text="Acme was founded in 2009. Licences for our call "
+                                                       "archive start at £2,500 per 1,000 hours.")
+    r = _research([]).model_copy(update={
+        "price": Fact(value="£2,500 per 1,000 hours", url="https://acme.com",
+                      quote="Licences for our call archive start at £2,500 per 1,000 hours"),
+        "founded": Fact(value="2011", quote="Acme was founded in 2009", url="https://acme.com"),
+        "data_period": Fact(value="2015 to 2023", quote="Calls were recorded from 2015 to 2023",
+                            url="https://gone.example"),
+    })
+    r = verify_research(r, crawl, _no_fetch)
+    assert r.price.value == "£2,500 per 1,000 hours"
+    assert r.founded is None  # the quote says 2009
+    assert r.data_period is None  # page unreachable, so unverified
+
+
+def test_value_in_quote():
+    assert value_in_quote("$1,250.50 per hour", "Priced at $1250.50 an hour")
+    assert value_in_quote("On request", "Pricing is available on request")
+    assert not value_in_quote("2012", "Founded in 2014")
+
+
+def test_candidate_prefers_research_facts():
+    screen_price = Fact(value="$30 per hour", quote="Meeting audio costs $30 per hour", url="https://acme.com")
+    c = Candidate(name="Acme", website="https://acme.com", domain="acme.com", channels=[], source_urls=[],
+                  price=screen_price)
+    assert c.fact("price") == screen_price and c.fact("founded") is None
+    researched = Fact(value="$25 per hour", quote="Licences cost $25 per hour", url="https://acme.com/data")
+    c.research = _research([]).model_copy(update={"price": researched})
+    assert c.fact("price") == researched

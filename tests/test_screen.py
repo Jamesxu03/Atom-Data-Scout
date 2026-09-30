@@ -6,7 +6,7 @@ from worker.brief_template import CUSTOMER_EXCLUDE, VENDORS, Pick
 from worker.config import MUST_HAVE_CAP, SCREEN_BATCH_SIZE, TECHNOLOGY_CAP
 from worker.schemas import Candidate
 from worker.scoring import is_relevant, rank
-from worker.steps.screen import ScreenBatch, ScreenItem, screen, source_excerpt
+from worker.steps.screen import ScreenBatch, ScreenItem, Stated, screen, source_excerpt
 
 
 def _cand(domain):
@@ -311,3 +311,25 @@ def test_volume_set_to_any_is_ignored(fake_ask):
     screen(brief_with(volume=Pick(amount=1000, unit="hours", importance="any")), [c], fetch=lambda _: "text",
            progress=lambda _: None)
     assert c.scores.volume is None
+
+
+def test_price_and_age_kept_only_with_a_quote_on_the_page(fake_ask):
+    home = "Acme records meetings for teams. Our meeting audio costs $30 per audio hour."
+    src = ("Source page on another site (https://listings.example/acme), passage mentioning it:\n"
+           "Acme meeting recordings were collected from 2018 to 2024 across the UK.")
+    fake_ask.responses[ScreenBatch] = _answer(
+        price=Stated(value="$30 per audio hour", quote="Our meeting audio costs $30 per audio hour"),
+        founded=Stated(value="2012", quote="Acme was founded in 2012 by two engineers"),  # not on the pages
+        data_period=Stated(value="2016 to 2024", quote="Acme meeting recordings were collected from 2018 to 2024"),
+    )
+    c = _cand("acme.com")
+    screen(BRIEF, [c], fetch=lambda _: home, progress=lambda _: None, source=lambda _: src)
+    assert (c.price.value, c.price.url) == ("$30 per audio hour", "https://acme.com")
+    assert c.founded is None
+    assert c.data_period is None  # 2016 isn't in the quote, so the quote doesn't back the value
+
+    fake_ask.responses[ScreenBatch] = _answer(data_period=Stated(
+        value="2018 to 2024", quote="Acme meeting recordings were collected from 2018 to 2024"))
+    c = _cand("acme.com")
+    screen(BRIEF, [c], fetch=lambda _: home, progress=lambda _: None, source=lambda _: src)
+    assert (c.data_period.value, c.data_period.url) == ("2018 to 2024", "https://listings.example/acme")

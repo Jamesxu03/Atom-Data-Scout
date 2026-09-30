@@ -1,6 +1,7 @@
 """Streamlit page with the Gemini-backed steps stubbed out (no Gemini, no network)."""
 
 import time
+from datetime import date
 
 from streamlit.testing.v1 import AppTest
 
@@ -8,7 +9,7 @@ from tests.test_hypotheses import BRIEF, brief_with
 from worker import pipeline, sessions
 from worker.brief_template import UNCLEAR, BriefDraft, Pick
 from worker.discovery import Discovery, Hit
-from worker.schemas import Candidate, Contact, EmailDraft, Evidence, Research, Scores
+from worker.schemas import Candidate, Contact, EmailDraft, Evidence, Fact, Research, Scores
 from worker.steps import brief as brief_step
 from worker.steps import email as email_step
 
@@ -139,3 +140,35 @@ def test_reopen_session_research_panel_and_email(monkeypatch):
     assert next(m for m in at.multiselect if m.label == "Languages and dialects").value == ["English"]
     assert at.text_input[0].value == "Meeting audio"
     assert at.text_input[1].value == "multi-speaker meeting audio"
+
+
+def test_language_and_volume_filters_and_price_and_age_columns():
+    cands = _candidates()
+    cands[0].price = Fact(value="$30 per audio hour", quote="Meeting audio costs $30 per audio hour",
+                          url="https://egodata.example")
+    cands[1].founded = Fact(value="2016", quote="Otter was founded in 2016 in California", url="https://otter.ai")
+    s = sessions.create("Meeting audio", BRIEF)
+    s.discovery = Discovery(hits=[], candidates=cands)
+    s.meta.stage = "done"
+    sessions.save(s)
+    key = s.path.name
+
+    at = AppTest.from_file("../app.py", default_timeout=30).run()
+    next(b for b in at.sidebar.button if b.label.startswith("**Meeting audio**")).click().run()
+
+    def table():
+        return next(df for df in at.dataframe if "Fit" in df.value.columns).value
+
+    assert list(table()["Company"]) == ["EgoData", "Otter", "Down"]
+    assert list(table()["Price"]) == ["$30 per audio hour", "?", "?"]
+    assert list(table()["Founded"])[1] == f"2016 ({date.today().year - 2016} years)"
+
+    at.multiselect(key=f"languages-{key}").set_value(["English"]).run()
+    assert list(table()["Company"]) == ["Otter"]  # the only one with evidence for English
+    at.multiselect(key=f"languages-{key}").set_value([]).run()
+
+    at.select_slider(key=f"volume-{key}").set_value(4).run()
+    assert list(table()["Company"]) == ["EgoData", "Otter", "Down"]  # unknown volume still shown
+    at.toggle(key=f"unknown-volume-{key}").set_value(True).run()
+    assert list(table()["Company"]) == ["Otter"]
+    assert not at.exception

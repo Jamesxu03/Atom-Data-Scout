@@ -59,7 +59,7 @@ def test_search_stops_after_scoring(fake_ask, monkeypatch):
     f = pipeline.funnel(loaded.discovery)
     assert f.found > f.unique == len(cands) and (f.screened, f.relevant, f.researched) == (len(cands), 1, 0)
     csv_rows = pipeline.candidates_csv(cands, BRIEF).splitlines()
-    assert "fit" in csv_rows[0] and "languages" in csv_rows[0]
+    assert "fit" in csv_rows[0] and "languages" in csv_rows[0] and "price,founded,data_period" in csv_rows[0]
     assert csv_rows[1].startswith("Otter,otter.ai,")
 
 
