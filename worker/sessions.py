@@ -3,7 +3,7 @@ rerunning:
 
   data/sessions/20260930-1215-middle-east-meeting-audio/
     session.json     name, created, brief text, stage, timings, selected domains
-    brief.json       the final Brief
+    brief.json       the final Brief: every category's choices, importance, stated or inferred
     hypotheses.json
     discovery.json   hits + candidates (scores, research, contacts and email on each)
 
@@ -11,6 +11,7 @@ The timestamp prefix keeps folder names in creation order. Rerunning with an edi
 always creates a new session, so old results are never overwritten.
 """
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -19,8 +20,9 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from worker.brief_template import Brief, from_legacy
 from worker.discovery import Discovery
-from worker.schemas import Brief, HolderHypothesis
+from worker.schemas import HolderHypothesis
 from worker.scoring import is_relevant
 from worker.steps.hypotheses import HypothesisList
 
@@ -87,13 +89,18 @@ def _read[T: BaseModel](path: Path, schema: type[T]) -> T | None:
     return schema.model_validate_json(path.read_text(encoding="utf-8")) if path.exists() else None
 
 
+def _read_brief(path: Path) -> Brief:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return from_legacy(data) if "data_type" in data else Brief.model_validate(data)  # made before the template
+
+
 def load(path: Path | str) -> Session:
     path = Path(path)
     hyps = _read(path / "hypotheses.json", HypothesisList)
     return Session(
         path=path,
         meta=_read(path / "session.json", SessionMeta),
-        brief=_read(path / "brief.json", Brief),
+        brief=_read_brief(path / "brief.json"),
         hypotheses=hyps.hypotheses if hyps else [],
         discovery=_read(path / "discovery.json", Discovery) or Discovery(hits=[], candidates=[]),
     )

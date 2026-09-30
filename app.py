@@ -19,18 +19,21 @@ import pandas as pd
 import streamlit as st
 
 from worker import pipeline, sessions
-from worker.config import RELEVANT_FIT
-from worker.schemas import (
-    LICENCE_LABELS,
-    MUST_HAVE_FIELDS,
-    SOURCE_LABELS,
+from worker.brief_template import (
+    CATEGORIES,
+    CODE_LABELS,
+    IMPORTANCE_LABELS,
+    SECTIONS,
     Brief,
     BriefDraft,
-    Candidate,
-    Contact,
-    Volume,
+    Category,
+    Pick,
+    suggested_languages,
+    transfer_flags,
 )
-from worker.scoring import prior_label
+from worker.config import RELEVANT_FIT
+from worker.schemas import Candidate, Contact
+from worker.scoring import must_failures, prior_label
 from worker.steps import brief as brief_step
 from worker.steps import email as email_step
 
@@ -39,11 +42,9 @@ EXAMPLE_BRIEF = (
     "with transcripts and speaker labels, at least 1,000 hours, licensed for model training."
 )
 LOGO = "assets/atom_logo.png"
-VOLUME_UNITS = ["hours", "utterances", "data points", "GB", "images", "videos"]
 HOLDER_LABELS = {"vendor": "Vendor", "public": "Public", "by_product": "By-product",
                  "technology": "Technology", "unrelated": "Unrelated", None: "Unknown"}
-STATUS_LABELS = {"sellable": "sellable", "open": "open licence", "open_restricted": "open, restricted use",
-                 "needs_consent": "needs consent", "internal_only": "internal use only", "unknown": "unknown"}
+VERDICT_ICONS = {"meets": "✅", "fails": "❌", "unclear": "❔"}
 LEGAL_NOTE = "Licence status is a screening flag from public pages, not legal advice."
 
 
@@ -120,7 +121,7 @@ def new_session() -> None:
 def new_from_brief(path: str) -> None:
     """Open the form prefilled with this session's brief; saving creates a new session."""
     s = sessions.load(path)
-    set_draft(BriefDraft(brief=s.brief, suggested=[], options=[], questions=[]), s.meta.brief_text)
+    set_draft(BriefDraft(brief=s.brief), s.meta.brief_text)
     st.session_state.session_path = None
     st.session_state.session_name = s.meta.name
 
@@ -165,12 +166,62 @@ def brief_page() -> None:
                 st.error(f"Couldn't refine the brief — {type(e).__name__}: {e}")
                 return
         set_draft(draft, text)
-        st.session_state.session_name = draft.brief.data_type
+        st.session_state.session_name = draft.brief.description
         st.rerun()
 
 
-def _options(draft: BriefDraft, name: str) -> list[str]:
-    return [o for fo in draft.options if fo.field == name for o in fo.options]
+def _help(cat: Category) -> str:
+    used = ", ".join(CODE_LABELS[c] for c in cat.used_for)
+    return f"{cat.code} · used for {used}" + (f". {cat.help}" if cat.help else "")
+
+
+def category_input(cat: Category, b: Brief, fid: int, picks: dict[str, Pick]) -> Pick:
+    """One category: its choices (pills, a multiselect, a number and unit, or years) and an
+    importance selector. Picks the model inferred carry an "inferred" caption until changed."""
+    old, key = b.pick(cat.key), f"{fid}-{cat.key}"
+    value_col, importance_col = st.columns([4, 1], vertical_alignment="bottom")
+    amount = amount_to = unit = None
+    values: list[str] = []
+    with value_col:
+        if cat.pick == "amount":
+            a, u = st.columns([2, 1])
+            amount = a.number_input(cat.label, min_value=0.0, value=old.amount, step=1000.0, format="%.0f",
+                                    key=f"{key}-amount", help=_help(cat))
+            units = list(cat.choices)
+            unit = u.selectbox("Unit", units, index=units.index(old.unit) if old.unit in units else 0,
+                               key=f"{key}-unit")
+        elif cat.pick == "years":
+            a, t = st.columns(2)
+            amount = a.number_input(f"{cat.label}: from", 1900, 2100, value=int(old.amount) if old.amount else None,
+                                    key=f"{key}-from", help=_help(cat))
+            amount_to = t.number_input("to", 1900, 2100, value=int(old.amount_to) if old.amount_to else None,
+                                       key=f"{key}-to")
+        elif cat.free_text or cat.pick == "text":
+            options = list(cat.choices)
+            if cat.key == "languages":  # suggestions follow the regions picked above
+                options += suggested_languages(picks["region"].values if "region" in picks else [])
+            values = st.multiselect(cat.label, list(dict.fromkeys(options + old.values)), default=old.values,
+                                    accept_new_options=True, key=key, help=_help(cat),
+                                    placeholder="Pick or type your own")
+        else:
+            mode = "single" if cat.pick == "single" else "multi"
+            default = [v for v in old.values if v in cat.choices]
+            chosen = st.pills(cat.label, list(cat.choices), selection_mode=mode,
+                              default=(default[0] if default else None) if mode == "single" else default,
+                              key=key, help=_help(cat))
+            values = [chosen] if isinstance(chosen, str) else list(chosen or [])
+    with importance_col:
+        importance = st.segmented_control(
+            "Importance", list(IMPORTANCE_LABELS), default=old.importance, format_func=IMPORTANCE_LABELS.get,
+            key=f"{key}-importance", label_visibility="collapsed") or "any"
+    new = Pick(values=values, amount=amount, amount_to=amount_to, unit=unit if amount is not None else None,
+               importance=importance)
+    same = (new.values, new.amount, new.amount_to, new.importance) == (old.values, old.amount, old.amount_to,
+                                                                      old.importance)
+    if cat.key in b.picks and old.source == "inferred" and same:
+        new.source = "inferred"
+        st.caption("inferred — not stated in the brief")
+    return new
 
 
 def form_page(draft: BriefDraft) -> None:
@@ -180,67 +231,33 @@ def form_page(draft: BriefDraft) -> None:
         st.rerun()
     if draft.questions:
         st.info("**Check with the buyer**\n" + "\n".join(f"- {q}" for q in draft.questions))
+    st.caption("Importance: **Must have** caps the fit when evidence contradicts it · **Nice to have** is "
+               "weighted into the score · **Any** is ignored. Unknown evidence stays neutral.")
 
-    def suggested(name: str) -> None:
-        if name in draft.suggested:
-            st.caption("suggested")
+    name = st.text_input("Session name", st.session_state.get("session_name") or b.description, key=f"{fid}-name")
+    description = st.text_input("What data, in a few words", b.description, key=f"{fid}-description",
+                                help="Used in every search, e.g. multi-speaker meeting audio")
+    picks: dict[str, Pick] = {}
+    for section in SECTIONS:
+        if section.modalities and not set(picks["modality"].values) & set(section.modalities):
+            continue  # add-ons appear once their modality is ticked
+        title = section.title if section.modalities else f"{section.code}. {section.title}"
+        with st.expander(title, expanded=section.code in ("A", "B", "C") or bool(section.modalities)):
+            for cat in section.categories:
+                picks[cat.key] = category_input(cat, b, fid, picks)
+            if section.code == "D":
+                for flag in transfer_flags(picks["region"].values, picks["processing"].values):
+                    st.warning(flag)
+    notes = st.text_area("Notes", b.notes, key=f"{fid}-notes")
 
-    def multi(label: str, name: str, help: str | None = None) -> list[str]:
-        values = getattr(b, name)
-        out = st.multiselect(label, list(dict.fromkeys(values + _options(draft, name))), default=values,
-                             accept_new_options=True, key=f"{fid}-{name}", help=help)
-        suggested(name)
-        return out
-
-    with st.form(f"brief-form-{fid}"):
-        name = st.text_input("Session name", st.session_state.get("session_name") or b.data_type,
-                             key=f"{fid}-name")
-        data_type = st.selectbox("Data type", list(dict.fromkeys([b.data_type] + _options(draft, "data_type"))),
-                                 accept_new_options=True, key=f"{fid}-data_type")
-        suggested("data_type")
-        left, right = st.columns(2)
-        with left:
-            features = multi("Features", "features", "e.g. multi-speaker, overlapping speech, far-field")
-            scenarios = multi("Scenarios", "scenarios")
-            label_types = multi("Labels", "label_types")
-            formats = multi("Formats", "formats", "e.g. 16 kHz WAV")
-        with right:
-            languages = multi("Languages", "languages", "Dialects allowed, e.g. Gulf Arabic")
-            regions = multi("Regions", "regions", "e.g. Middle East")
-            amount_col, unit_col = st.columns(2)
-            amount = amount_col.number_input("Minimum volume", min_value=0.0, value=b.volume.amount,
-                                             step=100.0, format="%.0f", key=f"{fid}-amount")
-            unit = unit_col.selectbox("Unit", list(dict.fromkeys(([b.volume.unit] if b.volume.unit else [])
-                                                                 + VOLUME_UNITS)),
-                                      accept_new_options=True, key=f"{fid}-unit")
-            suggested("volume")
-            licence = st.selectbox("Licence", list(LICENCE_LABELS), index=list(LICENCE_LABELS).index(b.licence),
-                                   format_func=LICENCE_LABELS.get, key=f"{fid}-licence")
-            suggested("licence")
-        holder_types = st.multiselect("Sources the buyer accepts", list(SOURCE_LABELS), default=b.holder_types,
-                                      format_func=lambda h: SOURCE_LABELS[h].capitalize(), key=f"{fid}-holders",
-                                      help="Vendors and public sources off also skips their search channels")
-        exclusions = st.multiselect("Skip these domains", b.exclusions, default=b.exclusions,
-                                    accept_new_options=True, key=f"{fid}-exclusions",
-                                    help="Type a domain, e.g. otter.ai, and press Enter")
-        must_have = st.multiselect("Must have", MUST_HAVE_FIELDS, default=b.must_have,
-                                   format_func=lambda f: f.replace("_", " "), key=f"{fid}-must",
-                                   help="Companies with no evidence of a must-have language or region rank low")
-        notes = st.text_area("Notes", b.notes, key=f"{fid}-notes")
-        submitted = st.form_submit_button("Save and search", type="primary")
-
-    if not submitted:
+    if not st.button("Save and search", type="primary"):
         return
-    if not (data_type or "").strip():
-        st.error("Data type can't be empty.")
+    if not description.strip():
+        st.error("Say what data, in a few words.")
         return
-    brief = Brief(
-        data_type=data_type.strip(), features=features, scenarios=scenarios, languages=languages,
-        regions=regions, label_types=label_types, volume=Volume(amount=amount, unit=unit if amount else None),
-        formats=formats, licence=licence, holder_types=holder_types, exclusions=exclusions,
-        must_have=must_have, notes=notes,
-    )
-    s = sessions.create(name.strip() or brief.data_type, brief, st.session_state.get("brief_copy", ""))
+    brief = Brief(description=description.strip(), notes=notes,
+                  picks={k: p for k, p in picks.items() if p.values or p.amount is not None or p.amount_to is not None})
+    s = sessions.create(name.strip() or brief.description, brief, st.session_state.get("brief_copy", ""))
     open_session(str(s.path))
     start_search(str(s.path))
     st.rerun()
@@ -254,7 +271,7 @@ def fmt(x: float | None) -> str:
 
 def licence_label(c: Candidate) -> str:
     if c.research:
-        return f"checked: {STATUS_LABELS[c.research.licence_status]}"
+        return f"checked: {c.research.licence}"
     if c.holder_type in (None, "unrelated"):
         return "?"
     return f"prior: {prior_label(c.holder_type, c.data_owner)}"
@@ -289,6 +306,8 @@ def session_page(path: str) -> None:
     st.subheader(s.meta.name)
     st.caption(f"Created {s.meta.created:%d %b %Y, %H:%M}")
     st.info(s.brief.summary())
+    for flag in transfer_flags(s.brief.regions, s.brief.chosen("processing")):
+        st.warning(flag)
     st.fragment(progress_panel, run_every=1 if job_here else None)(path)
 
     if job_here and job.kind == "search":
@@ -330,7 +349,8 @@ def candidates_table(s: sessions.Session, path: str) -> None:
                           help="Companies whose fit is unknown (homepage unreachable) are always shown, last")
     present = list(dict.fromkeys(c.holder_type for c in s.discovery.candidates if not c.excluded))
     types = mid.multiselect("Type", present, default=present, format_func=HOLDER_LABELS.get, key=f"types-{key}")
-    show_excluded = right.toggle("Show excluded", key=f"excluded-{key}", help="Unrelated companies and dead websites")
+    show_excluded = right.toggle("Show excluded", key=f"excluded-{key}",
+                                 help="Unrelated companies, dead websites, and ones a must-have filter rules out")
 
     rows = [
         c for c in s.discovery.candidates
@@ -352,6 +372,7 @@ def candidates_table(s: sessions.Session, path: str) -> None:
                 "Volume": fmt(c.scores.volume),
                 "Languages and regions": ", ".join(c.languages + c.regions),
                 "Reason": c.reason,
+                "Must-haves not met": ", ".join(CATEGORIES[k].label for k in must_failures(c, s.brief)),
                 "Website": c.website,
                 "Found on": c.source_urls[0] if c.source_urls else None,
                 "Source checked": c.source_verified,
@@ -368,6 +389,8 @@ def candidates_table(s: sessions.Session, path: str) -> None:
             "Licence": st.column_config.TextColumn(
                 help="prior: a guess from the holder type until research checks it. " + LEGAL_NOTE),
             "Coverage": st.column_config.TextColumn(help="Evidence for the brief's languages and regions"),
+            "Must-haves not met": st.column_config.TextColumn(
+                help="Must-have categories the evidence contradicts; each caps the fit"),
             "Website": st.column_config.LinkColumn(),
             "Found on": st.column_config.LinkColumn(),
             "Source checked": st.column_config.CheckboxColumn(
@@ -381,7 +404,7 @@ def candidates_table(s: sessions.Session, path: str) -> None:
         help="Tick rows in the table first. Two Gemini calls per company (research and contacts).",
     )
     st.caption(LEGAL_NOTE)
-    st.download_button("Download candidates CSV", pipeline.candidates_csv(s.discovery.candidates),
+    st.download_button("Download candidates CSV", pipeline.candidates_csv(s.discovery.candidates, s.brief),
                        "candidates.csv", "text/csv")
 
 
@@ -398,8 +421,10 @@ def researched(s: sessions.Session, path: str, locked: bool) -> None:
     st.subheader("Researched")
     for c in done:
         r = c.research
-        with st.expander(f"{c.name} — fit {fmt(c.fit)} — licence {STATUS_LABELS[r.licence_status]}"):
-            st.markdown(f"**Licence:** {STATUS_LABELS[r.licence_status]}")
+        with st.expander(f"{c.name} — fit {fmt(c.fit)} — licence {r.licence}"):
+            accepted = s.brief.active("licence")
+            fits = f" (you accept: {', '.join(accepted)})" if accepted else ""
+            st.markdown(f"**Licence:** {r.licence}{fits}")
             for ev in r.licence_evidence:
                 st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
             if not r.licence_evidence:
@@ -408,6 +433,13 @@ def researched(s: sessions.Session, path: str, locked: bool) -> None:
             for ev in r.volume_evidence:
                 st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
             st.markdown(f"**Data held:** {r.data_held}")
+            if r.checks:
+                st.markdown("**Checks against the brief**")
+            for ch in r.checks:
+                st.markdown(f"{VERDICT_ICONS[ch.verdict]} **{CATEGORIES[ch.category].label}** "
+                            f"({s.brief.value_text(ch.category)}): {ch.finding}")
+                for ev in ch.evidence:
+                    st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
             st.caption(LEGAL_NOTE)
             contacts_section(c, path)
             email_section(s, c, path, locked)

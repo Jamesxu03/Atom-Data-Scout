@@ -3,8 +3,9 @@
 from pydantic import BaseModel, Field
 
 from worker import llm
+from worker.brief_template import Brief
 from worker.config import HYPOTHESES_THINKING_LEVEL, MODEL
-from worker.schemas import Brief, HolderHypothesis
+from worker.schemas import HolderHypothesis
 
 
 class HypothesisList(BaseModel):
@@ -51,7 +52,7 @@ The buyer wants:
 
 
 def hypotheses(brief: Brief) -> list[HolderHypothesis]:
-    prompt = PROMPT.format(brief=brief.summary())
+    prompt = PROMPT.format(brief=brief.summary("S"))
     result = llm.ask(prompt, HypothesisList, model=MODEL, thinking=HYPOTHESES_THINKING_LEVEL)
     return result.hypotheses
 

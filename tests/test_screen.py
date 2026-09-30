@@ -1,7 +1,8 @@
 import httpx
 import pytest
 
-from tests.test_hypotheses import BRIEF
+from tests.test_hypotheses import BRIEF, brief_with
+from worker.brief_template import CUSTOMER_EXCLUDE, VENDORS, Pick
 from worker.config import MUST_HAVE_CAP, SCREEN_BATCH_SIZE, TECHNOLOGY_CAP
 from worker.schemas import Candidate
 from worker.scoring import is_relevant, rank
@@ -60,7 +61,10 @@ def test_screen_scores_and_excludes(fake_ask):
     (call,) = fake_ask.calls  # one batch; unreachable homepage never sent to the model
     assert "down.com" not in call.prompt
     assert call.prompt.count("homepage text") < 2000  # text is truncated per company
-    assert "data_match (1 to 5)" in call.prompt and "- features: multi-speaker" in call.prompt
+    assert "data_match (1 to 5)" in call.prompt
+    assert "Must have — Modality: Audio/speech" in call.prompt and "Speakers per recording: 3 to 5" in call.prompt
+    assert "- modality: Modality: Audio/speech" in call.prompt  # must-haves listed by key
+    assert "Volume: 1,000 hours" in call.prompt
 
 
 def test_screen_batches(fake_ask):
@@ -148,7 +152,7 @@ def test_technology_company_is_capped(fake_ask):
 
 def test_no_evidence_for_a_must_have_language_caps_fit(fake_ask):
     fake_ask.responses[ScreenBatch] = _score_by_prefix
-    brief = BRIEF.model_copy(update={"must_have": ["languages"]})
+    brief = brief_with(languages=Pick(values=["English"], importance="must"))
     local, global_tool = _cand("good-local.com"), _cand("good-nolang.com")
     screen(brief, [local, global_tool], fetch=lambda _: "text", progress=lambda _: None)
     assert local.languages == ["English"] and local.fit > MUST_HAVE_CAP
@@ -176,7 +180,7 @@ def test_only_the_briefs_languages_and_regions_count(fake_ask):
         ])
 
     fake_ask.responses[ScreenBatch] = answer
-    brief = BRIEF.model_copy(update={"languages": ["Estonian", "Latvian"], "regions": ["Baltics"]})
+    brief = brief_with(languages=Pick(values=["Estonian", "Latvian"]), region=Pick(values=["Baltics"]))
     tilde, other = _cand("tilde.ee"), _cand("global.com")
     screen(brief, [tilde, other], fetch=lambda _: "text", progress=lambda _: None)
     assert (tilde.languages, tilde.regions, tilde.scores.coverage) == (["Latvian"], ["Baltics"], 5)
@@ -187,8 +191,12 @@ def test_only_the_briefs_languages_and_regions_count(fake_ask):
 def test_coverage_unknown_when_brief_names_no_languages_or_regions(fake_ask):
     fake_ask.responses[ScreenBatch] = _score_by_prefix
     c = _cand("good-nolang.com")
-    screen(BRIEF.model_copy(update={"languages": []}), [c], fetch=lambda _: "text", progress=lambda _: None)
+    screen(brief_with(languages=None), [c], fetch=lambda _: "text", progress=lambda _: None)
     assert c.scores.coverage is None
+    d = _cand("good-nolang2.com")  # a language set to Any counts for nothing
+    screen(brief_with(languages=Pick(values=["English"], importance="any")), [d], fetch=lambda _: "text",
+           progress=lambda _: None)
+    assert d.scores.coverage is None
 
 
 def test_vendor_working_on_customers_data_is_by_product(fake_ask):
@@ -263,3 +271,43 @@ def test_source_excerpt_prefers_own_site_and_quotes_other_sites_around_the_menti
 
     c.source_urls = ["https://acme.com/", "https://www.acme.com"]  # the homepage is already sent
     assert source_excerpt(c, lambda url: pytest.fail(f"fetched {url}")) is None
+
+
+def _answer(**kw):
+    item = dict(domain="acme.com", holder_type="by_product", data_owner="customers", data_match=5,
+                languages=["English"], regions=[], volume_signal=3, reason="call recording service")
+    return lambda prompt: ScreenBatch(results=[ScreenItem(**{**item, **kw})])
+
+
+def test_only_must_have_contradictions_cap(fake_ask):
+    fake_ask.responses[ScreenBatch] = _answer(contradicts=["modality", "speakers", "made_up"])
+    c = _cand("acme.com")
+    screen(BRIEF, [c], fetch=lambda _: "text", progress=lambda _: None)
+    assert c.contradicts == ["modality"]  # speakers is only nice to have; unknown keys dropped
+    assert c.fit == MUST_HAVE_CAP
+
+
+def test_must_have_filters_exclude(fake_ask):
+    fake_ask.responses[ScreenBatch] = _answer()
+    vendors_only = brief_with(sources=Pick(values=[VENDORS], importance="must"))
+    c = _cand("acme.com")
+    screen(vendors_only, [c], fetch=lambda _: "text", progress=lambda _: None)
+    assert c.excluded and "not a source type the buyer accepts" in c.reason
+
+    no_customer_data = brief_with(customer_data=Pick(values=[CUSTOMER_EXCLUDE], importance="must"))
+    c = _cand("acme.com")
+    screen(no_customer_data, [c], fetch=lambda _: "text", progress=lambda _: None)
+    assert c.excluded and "customers' data" in c.reason
+
+    nice = brief_with(sources=Pick(values=[VENDORS]), customer_data=Pick(values=[CUSTOMER_EXCLUDE]))
+    c = _cand("acme.com")
+    screen(nice, [c], fetch=lambda _: "text", progress=lambda _: None)
+    assert not c.excluded and c.scores.licence == 1  # nice to have: scored down, not dropped
+
+
+def test_volume_set_to_any_is_ignored(fake_ask):
+    fake_ask.responses[ScreenBatch] = _answer(volume_signal=1)
+    c = _cand("acme.com")
+    screen(brief_with(volume=Pick(amount=1000, unit="hours", importance="any")), [c], fetch=lambda _: "text",
+           progress=lambda _: None)
+    assert c.scores.volume is None

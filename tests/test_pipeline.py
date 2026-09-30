@@ -58,7 +58,7 @@ def test_search_stops_after_scoring(fake_ask, monkeypatch):
         assert h.source_checked == (normalize_domain(h.website) in domains), h
     f = pipeline.funnel(loaded.discovery)
     assert f.found > f.unique == len(cands) and (f.screened, f.relevant, f.researched) == (len(cands), 1, 0)
-    csv_rows = pipeline.candidates_csv(cands).splitlines()
+    csv_rows = pipeline.candidates_csv(cands, BRIEF).splitlines()
     assert "fit" in csv_rows[0] and "languages" in csv_rows[0]
     assert csv_rows[1].startswith("Otter,otter.ai,")
 
@@ -73,7 +73,7 @@ def test_research_covers_only_selected_and_rescores(fake_ask, monkeypatch):
                      linkedin_url=None, source_url="https://otter.ai/team"),
     ])
     fake_ask.responses[Research] = Research(
-        data_held="meeting recordings", licence_status="internal_only",
+        data_held="meeting recordings", licence="Internal use only",
         licence_evidence=[Evidence(quote="Recordings are only used internally by Otter", url="https://otter.ai")],
         volume_estimate=None, volume_score=None, volume_evidence=[])
     crawled = []
@@ -87,7 +87,7 @@ def test_research_covers_only_selected_and_rescores(fake_ask, monkeypatch):
     assert crawled == ["https://otter.ai"]
     assert len(fake_ask.calls_for(Research)) == 1 and len(fake_ask.calls_for(FoundContacts)) == 1
     otter = next(c for c in s.discovery.candidates if c.domain == "otter.ai")
-    assert otter.research.licence_status == "internal_only"
+    assert otter.research.licence == "Internal use only"
     assert otter.scores.licence == 1 and otter.fit == 2.0 < before  # re-scored and capped
     assert [(k.email, k.verified) for k in otter.contacts] == [
         ("ceo@otter.ai", True),  # from the website

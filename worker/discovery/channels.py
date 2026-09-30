@@ -5,10 +5,11 @@ import re
 import httpx
 
 from worker import llm
+from worker.brief_template import Brief
 from worker.config import DISCOVERY, MODEL
 from worker.crawl import fetch_html_quick
 from worker.discovery.domains import normalize_domain
-from worker.schemas import Brief, Found, FoundList, HolderHypothesis
+from worker.schemas import Found, FoundList, HolderHypothesis
 
 RULES = """Rules:
 - Use Google Search. Only return companies you actually found in search results.
@@ -160,12 +161,7 @@ paper or article.""",
 
 
 def _wanted(brief: Brief) -> str:
-    return f"""- data type: {brief.data_type}
-- features: {", ".join(brief.features) or "any"}
-- scenarios: {", ".join(brief.scenarios) or "any"}
-- languages: {", ".join(brief.languages) or "any"}
-- regions: {", ".join(brief.regions) or "any"}
-- labels: {", ".join(brief.label_types) or "none"}"""
+    return brief.summary("S")
 
 
 def marketplace(brief: Brief, angle: str) -> list[Found]:
@@ -173,7 +169,7 @@ def marketplace(brief: Brief, angle: str) -> list[Found]:
     return _search(f"""Find companies that already produce or sell data similar to this:
 {_wanted(brief)}
 
-{MARKETPLACE_ANGLES[angle].format(data_type=brief.data_type)}
+{MARKETPLACE_ANGLES[angle].format(data_type=brief.description)}
 
 Also search with the terms data vendors and researchers use for this kind of data, which
 may differ from the wording above (e.g. "egocentric" for first-person video).""")
@@ -209,4 +205,20 @@ def public_source(brief: Brief, angle: str) -> list[Found]:
 similar to this:
 {_wanted(brief)}
 
-{PUBLIC_ANGLES[angle].format(data_type=brief.data_type)}{local}""")
+{PUBLIC_ANGLES[angle].format(data_type=brief.description)}{local}""")
+
+
+def distressed(brief: Brief, hypotheses: list[HolderHypothesis]) -> list[Found]:
+    """(f) Companies that held this kind of data and are insolvent, in administration, being
+    wound up or have shut down: their data is often sold off with the other assets."""
+    kinds = "\n".join(f"- {h.category}" for h in hypotheses[:5])
+    return _search(f"""Find companies that are insolvent, in administration, in liquidation,
+being wound up, have shut down, or are selling their assets, and that held data similar to this:
+{_wanted(brief)}
+
+Kinds of business likely to hold it:
+{kinds}
+
+Search insolvency notices and gazettes, administrators' and liquidators' asset sale pages,
+news of shutdowns, and "company shuts down" or "acquired for its data" stories.
+source_url must be the notice, sale page or article.""")

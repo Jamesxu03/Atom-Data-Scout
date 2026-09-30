@@ -1,51 +1,49 @@
-"""Refine step: free-text buyer brief -> BriefDraft (a filled-in Brief plus options and open
-questions for the form). The user edits the draft; the saved Brief is what the search uses."""
+"""Refine step: free-text buyer brief -> BriefDraft, filled in against the template in
+worker/brief_template.py. The Gemini schemas are built from the template with each category's
+choices as an enum, so the model can only return valid choices. The template is too big for one
+schema, so it is filled in two parallel calls (see FILL_PARTS). The user then edits the draft
+in the form; the saved Brief is what the search uses."""
+
+from concurrent.futures import ThreadPoolExecutor
 
 from worker import llm
+from worker.brief_template import FILL_PARTS, BriefDraft, category_guide, from_fill
 from worker.config import MODEL
-from worker.schemas import MUST_HAVE_FIELDS, Brief, BriefDraft
 
-PROMPT = """You are helping a data broker pin down what a buyer wants to acquire. Turn the
-buyer's text below into a complete data brief that a person will review in a form.
+PROMPT = """You are helping a data broker pin down what a buyer wants to acquire. Fill in the
+brief template from the buyer's text below. A person will review every field in a form.
+
+Fill in only the categories in your answer's schema; the full list is below for context.
+
+For each category, set status:
+- "must": the text states it as a hard requirement ("must", "only", "at least", "required").
+- "nice": the text states it as a preference, or states it without saying how strict it is.
+- "inferred": the text doesn't state it, but a sensible default clearly follows (e.g. speaker
+  labels for multi-speaker meeting audio, or a region from the languages named).
+- "not_set": the text doesn't say and nothing clearly follows. Most commercial categories
+  (budget, pricing, timeline) are not_set unless stated.
 
 Rules:
-- Fill each field from the text.
-- Where the text says nothing about a field, suggest a sensible value for this kind of data
-  and list that field name in `suggested`. Use exactly the field names of the brief.
-- `options`: for any field the buyer might want to vary, give 2 to 5 alternative values (e.g.
-  other languages or dialects, nearby regions, other formats, other volume units). One entry
-  per field; each option is a short value, not a sentence.
-- `questions`: things to check with the buyer before searching, e.g. an unclear volume or
-  licence, or whether dialects count.
-- `must_have`: only fields the text states as hard requirements ("must", "only",
-  "at least"). Never a field you suggested.
-- data_type: a short noun phrase, e.g. "multi-speaker meeting audio".
-- languages: include dialects where the text names them, e.g. "Gulf Arabic".
-- volume: the minimum amount and its unit if stated, e.g. 1000 and "hours".
-- licence: "training_only" if the data is for training models only, "commercial" for broader
-  commercial use, "exclusive" if exclusivity is asked for, "unknown" if unclear.
-- holder_types: the kinds of source the buyer accepts. All four ("vendor", "public",
-  "by_product", "technology") unless the text rules some out.
-- exclusions: company domains the text says to skip; otherwise empty.
-- notes: anything else in the text that matters and fits no field.
+- Only use the listed choices. Where a category takes values of its own (languages, domain
+  "other", specific countries, exclusions), use short values, e.g. "Gulf Arabic".
+- description: what data, in a few words, e.g. "multi-speaker meeting audio".
+- Fill the modality add-ons (audio, video/image, text, tabular) only for the modality chosen.
+- volume: the target amount and its unit, e.g. 2000000 and "data points".
+- licence (D1): the licence types the buyer would accept. Training for a commercial product
+  usually rules out "Restricted / Conditional".
+- questions: things to check with the buyer before searching, e.g. an unclear volume or
+  licence, whether dialects count, or where the data will be processed.
+
+The categories, by key:
+{guide}
 
 Buyer text:
 {text}
 """
 
-_BRIEF_FIELDS = set(Brief.model_fields)
-
 
 def draft_brief(text: str) -> BriefDraft:
-    draft = llm.ask(PROMPT.format(text=text), BriefDraft, model=MODEL)
-    return clean(draft)
-
-
-def clean(draft: BriefDraft) -> BriefDraft:
-    """Keep only real field names, and never let a suggested field become a requirement."""
-    suggested = [f for f in dict.fromkeys(draft.suggested) if f in _BRIEF_FIELDS]
-    must_have = [f for f in dict.fromkeys(draft.brief.must_have)
-                 if f in MUST_HAVE_FIELDS and f not in suggested]
-    options = [o for o in draft.options if o.field in _BRIEF_FIELDS and o.options]
-    brief = draft.brief.model_copy(update={"must_have": must_have})
-    return draft.model_copy(update={"brief": brief, "suggested": suggested, "options": options})
+    prompt = PROMPT.format(guide=category_guide(), text=text)
+    with ThreadPoolExecutor(len(FILL_PARTS)) as pool:
+        parts = list(pool.map(lambda schema: llm.ask(prompt, schema, model=MODEL), FILL_PARTS))
+    return from_fill(parts)

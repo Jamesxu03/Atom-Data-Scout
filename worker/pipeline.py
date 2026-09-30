@@ -16,13 +16,14 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
 from worker import sessions
+from worker.brief_template import Brief
 from worker.config import PARALLEL_CRAWLS
 from worker.crawl import CrawlResult, crawl
 from worker.discovery import Discovery, check_sources, discover, pick_seeds, snowball
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
 from worker.schemas import Candidate, Funnel
-from worker.scoring import is_relevant, rank, rescore
+from worker.scoring import is_relevant, must_failures, rank, rescore
 from worker.sessions import Session
 from worker.steps.contacts import find_contacts
 from worker.steps.hypotheses import hypotheses
@@ -178,16 +179,17 @@ def contacts_csv(candidates: list[Candidate]) -> str:
     return buf.getvalue()
 
 
-def candidates_csv(candidates: list[Candidate]) -> str:
+def candidates_csv(candidates: list[Candidate], brief: Brief) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["name", "domain", "website", "fit", "holder_type", "data_owner", "data_match", "coverage",
-                "volume", "licence", "licence_status", "languages", "regions", "reason", "excluded",
+                "volume", "licence", "licence_found", "must_haves_not_met", "languages", "regions", "reason", "excluded",
                 "channels", "source_verified", "source_urls"])
     for c in candidates:
         s = c.scores
         w.writerow([c.name, c.domain, c.website, c.fit, c.holder_type, c.data_owner, s.data_match, s.coverage,
-                    s.volume, s.licence, c.research.licence_status if c.research else None,
+                    s.volume, s.licence, c.research.licence if c.research else None,
+                    ", ".join(must_failures(c, brief)),
                     ", ".join(c.languages), ", ".join(c.regions), c.reason, c.excluded,
                     " ".join(c.channels), c.source_verified, " ".join(c.source_urls)])
     return buf.getvalue()

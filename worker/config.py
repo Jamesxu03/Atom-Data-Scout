@@ -20,6 +20,7 @@ DISCOVERY = {
     "directory_hypotheses": 1,  # (c) one call per hypothesis; broad categories mostly add noise
     "marketplace_calls": 3,  # (d) one call per angle in channels.MARKETPLACE_ANGLES (max 3)
     "public_source_calls": 2,  # (e) one call per angle in channels.PUBLIC_ANGLES (max 2)
+    "distressed_calls": 1,  # (f) insolvent, in administration or shut down
     "companies_per_call": 10,
 }
 

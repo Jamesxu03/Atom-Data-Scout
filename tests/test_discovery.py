@@ -1,6 +1,7 @@
 import httpx
 
-from tests.test_hypotheses import BRIEF
+from tests.test_hypotheses import BRIEF, brief_with
+from worker.brief_template import BY_PRODUCT, DISTRESSED, VENDORS, Pick
 from worker.config import DISCOVERY
 from worker.discovery import Discovery, Hit, channels, discover, merge, pick_seeds, snowball
 from worker.discovery.domains import normalize_domain
@@ -78,6 +79,9 @@ def _router(prompt: str) -> FoundList:
         ])
     if "already produce or sell data" in prompt:
         return FoundList(companies=[Found(name="DataCo", website="https://dataco.io", source_url="https://datarade.ai/x")])
+    if "insolvency notices" in prompt:
+        return FoundList(companies=[Found(name="Bust Co", website="https://bust.example",
+                                          source_url="https://gazette.example/notice")])
     if "not only companies" in prompt:
         return FoundList(companies=[Found(name="Parliament", website="https://parliament.example",
                                           source_url="https://parliament.example/sessions")])
@@ -94,7 +98,8 @@ def test_discover_runs_phase_one_channels_within_budget(fake_ask):
 
     angles = min(DISCOVERY["marketplace_calls"], len(channels.MARKETPLACE_ANGLES))
     public = min(DISCOVERY["public_source_calls"], len(channels.PUBLIC_ANGLES))
-    expected = DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"] + angles + public
+    expected = (DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"] + angles + public
+                + DISCOVERY["distressed_calls"])
     assert len(fake_ask.calls) == expected
     assert all(c.use_search for c in fake_ask.calls)
     assert not any("compete with" in c.prompt for c in fake_ask.calls)  # no snowball yet
@@ -103,23 +108,33 @@ def test_discover_runs_phase_one_channels_within_budget(fake_ask):
     public_prompts = [c.prompt for c in fake_ask.calls if "not only companies" in c.prompt]
     assert len(set(public_prompts)) == public
     assert all("Also search in English" in p for p in public_prompts)
-    assert all("- features: multi-speaker" in p for p in vendor_prompts + public_prompts)
+    assert all("Languages and dialects: English" in p for p in vendor_prompts + public_prompts)
 
     by_domain = {c.domain: c for c in d.candidates}
     assert set(by_domain["otter.ai"].channels) == {"product_search", "directory"}
     assert "g2.com" not in by_domain  # directories are sources, not candidates
     assert by_domain["dataco.io"].channels == ["marketplace"]
     assert by_domain["parliament.example"].channels == ["public_source"]
+    assert by_domain["bust.example"].channels == ["distressed"]
     assert len(d.hits) > len(d.candidates)
     assert not d.partial
 
 
-def test_discover_skips_channels_for_sources_the_buyer_rejects(fake_ask):
+def test_discover_only_runs_channels_for_the_source_types_picked(fake_ask):
     fake_ask.responses[FoundList] = _router
-    discover(BRIEF.model_copy(update={"holder_types": ["by_product"]}), HYPS, **QUIET)
+    discover(brief_with(sources=Pick(values=[BY_PRODUCT])), HYPS, **QUIET)
     assert not any("already produce or sell data" in c.prompt for c in fake_ask.calls)
-    assert not any("not only companies" in c.prompt for c in fake_ask.calls)
+    assert not any("not only companies" in c.prompt or "insolvency notices" in c.prompt for c in fake_ask.calls)
     assert len(fake_ask.calls) == DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"]
+
+    fake_ask.calls.clear()
+    d = discover(brief_with(sources=Pick(values=[VENDORS, DISTRESSED]), exclusions=Pick(values=["dataco.io"])),
+                 HYPS, **QUIET)
+    prompts = [c.prompt for c in fake_ask.calls]
+    assert not any("- query " in p for p in prompts)  # no product search or directories
+    assert sum("already produce or sell data" in p for p in prompts) == 2  # collection services, datasets
+    assert sum("insolvency notices" in p for p in prompts) == 1
+    assert "dataco.io" not in {c.domain for c in d.candidates} and d.exclusions == ["dataco.io"]
 
 
 def test_pick_seeds_uses_explicit_then_well_scored_by_product_holders():

@@ -3,8 +3,8 @@
 Two phases, so snowballing only starts from companies the screen scored well:
   discover()       — (a) product search, (c) directories, (d) data vendors (marketplaces,
                      collection services, published datasets), (e) public sources (open
-                     corpora, public bodies that publish recordings). (d) and (e) are skipped
-                     when the brief doesn't accept vendors or public sources.
+                     corpora, public bodies that publish recordings), (f) distressed or
+                     insolvent companies. With source types (E1) picked, only their channels run.
   snowball()       — (b) "alternatives to X" from explicit seeds + well-scored by-product
                      holders, limited to competitors working in the buyer's languages/regions
   check_sources()  — confirm source pages before screening, which reads them too
@@ -16,6 +16,16 @@ from collections.abc import Callable
 
 from pydantic import BaseModel
 
+from worker.brief_template import (
+    BY_PRODUCT,
+    DISTRESSED,
+    MARKETPLACES,
+    PUBLIC_BODIES,
+    RESEARCH_INSTITUTES,
+    TECHNOLOGY,
+    VENDORS,
+    Brief,
+)
 from worker.config import (
     DISCOVERY,
     PARALLEL_FETCHES,
@@ -26,7 +36,7 @@ from worker.config import (
 from worker.discovery import channels
 from worker.discovery.domains import is_aggregator, is_excluded, normalize_domain
 from worker.parallel import run_parallel
-from worker.schemas import Brief, Candidate, Channel, Found, HolderHypothesis
+from worker.schemas import Candidate, Channel, Found, HolderHypothesis
 
 Progress = Callable[[str], None]
 
@@ -116,29 +126,51 @@ def _run_channels(tasks, progress: Progress) -> tuple[list[Hit], list[str], bool
     return hits, errors, batch.quota_error is not None
 
 
+# E1 source type -> the channel angles that look for it
+ANGLE_SOURCES = {
+    "marketplace listings": {MARKETPLACES},
+    "collection services": {VENDORS},
+    "published datasets": {VENDORS, RESEARCH_INSTITUTES},
+    "open corpora": {RESEARCH_INSTITUTES, PUBLIC_BODIES},
+    "public recordings": {PUBLIC_BODIES},
+}
+
+
 def discover(brief: Brief, hypotheses: list[HolderHypothesis], progress: Progress = print) -> Discovery:
-    """Phase 1: product search, directories, data vendors and public sources, all calls in parallel."""
-    marketplace_calls = DISCOVERY["marketplace_calls"] if "vendor" in brief.holder_types else 0
-    public_calls = DISCOVERY["public_source_calls"] if "public" in brief.holder_types else 0
+    """Phase 1: every channel for the source types the brief wants (all, if none picked), all
+    calls in parallel."""
+    wanted = set(brief.active("sources"))
+
+    def looks_for(*sources: str) -> bool:
+        return not wanted or bool(wanted & set(sources))
+
+    def angles(names, budget):
+        return [a for a in names if looks_for(*ANGLE_SOURCES[a])][:budget]
+
+    products = looks_for(BY_PRODUCT, TECHNOLOGY)
     tasks = [
         (f"(a) product search: {h.category}", lambda h=h: channels.product_search(h),
          {"channel": "product_search", "hypothesis": h.category})
-        for h in hypotheses[: DISCOVERY["product_search_hypotheses"]]
+        for h in (hypotheses[: DISCOVERY["product_search_hypotheses"]] if products else [])
     ] + [
         (f"(c) directories: {h.category}", lambda h=h: channels.directory(h),
          {"channel": "directory", "hypothesis": h.category})
-        for h in hypotheses[: DISCOVERY["directory_hypotheses"]]
+        for h in (hypotheses[: DISCOVERY["directory_hypotheses"]] if products else [])
     ] + [
         (f"(d) data vendors: {angle}", lambda a=angle: channels.marketplace(brief, a), {"channel": "marketplace"})
-        for angle in list(channels.MARKETPLACE_ANGLES)[:marketplace_calls]
+        for angle in angles(channels.MARKETPLACE_ANGLES, DISCOVERY["marketplace_calls"])
     ] + [
         (f"(e) public sources: {angle}", lambda a=angle: channels.public_source(brief, a),
          {"channel": "public_source"})
-        for angle in list(channels.PUBLIC_ANGLES)[:public_calls]
+        for angle in angles(channels.PUBLIC_ANGLES, DISCOVERY["public_source_calls"])
+    ] + [
+        ("(f) distressed companies", lambda: channels.distressed(brief, hypotheses), {"channel": "distressed"})
+        for _ in range(DISCOVERY["distressed_calls"] if looks_for(DISTRESSED) else 0)
     ]
+    exclusions = brief.active("exclusions")
     hits, errors, partial = _run_channels(tasks, progress)
-    return Discovery(hits=hits, candidates=merge(hits, exclusions=brief.exclusions),
-                     exclusions=brief.exclusions, errors=errors, partial=partial)
+    return Discovery(hits=hits, candidates=merge(hits, exclusions=exclusions),
+                     exclusions=exclusions, errors=errors, partial=partial)
 
 
 def _good_seed(c: Candidate) -> bool:

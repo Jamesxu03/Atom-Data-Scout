@@ -4,8 +4,10 @@ well it matches the brief (1 to 5), evidence for the buyer's languages and regio
 of scale. Scores and fit are then computed in Python (see scoring.py).
 
 Rules the model doesn't apply reliably are enforced afterwards (see _apply): only the
-buyer's languages and regions count, and a "vendor" whose data belongs to its customers is a
-service, so a by-product holder. Unrelated companies and dead websites are excluded.
+buyer's languages and regions count, only must-have categories can be contradicted, and a
+"vendor" whose data belongs to its customers is a service, so a by-product holder. Unrelated
+companies, dead websites and companies a must-have filter rules out (E1 source types, D6
+customers' data) are excluded.
 """
 
 import socket
@@ -17,6 +19,7 @@ import trafilatura
 from pydantic import BaseModel, Field
 
 from worker import llm
+from worker.brief_template import CATEGORIES, CUSTOMER_EXCLUDE, Brief
 from worker.config import (
     MODEL,
     PARALLEL_FETCHES,
@@ -28,8 +31,8 @@ from worker.crawl import fetch_homepage_text, fetch_html_quick, same_site
 from worker.discovery.channels import GROUNDING_REDIRECT, mention_at
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
-from worker.schemas import Brief, Candidate, DataOwner, HolderType, Scores
-from worker.scoring import clamp, rescore
+from worker.schemas import Candidate, DataOwner, HolderType, Scores
+from worker.scoring import rescore
 
 
 class ScreenItem(BaseModel):
@@ -40,6 +43,7 @@ class ScreenItem(BaseModel):
     languages: list[str] = Field(description="The buyer's languages it shows evidence of working in")
     regions: list[str] = Field(description="The buyer's regions it shows evidence of working in")
     volume_signal: int | None = Field(description="1 to 5 from signs of scale; null if none")
+    contradicts: list[str] = Field(default=[], description="Keys of must-have requirements these pages clearly contradict")
     reason: str = Field(description="One line: what data it holds and why it matches or not")
 
 
@@ -48,13 +52,14 @@ class ScreenBatch(BaseModel):
 
 
 PROMPT = """You are screening companies for a data buyer. The buyer wants:
-- data type: {data_type}
-- features: {features}
-- languages: {languages}
-- regions: {regions}
-- scenarios: {scenarios}
-- labels: {labels}
-- volume: {volume}
+{brief}
+
+Languages: {languages}
+Regions: {regions}
+Volume: {volume}
+
+Must-have requirements, by key:
+{musts}
 
 Below are excerpts from several organisations' homepages and, when it's another page, from
 the page a web search found them on. Read both: the source page often shows the line of
@@ -91,9 +96,9 @@ data_owner:
 - "unclear": can't tell from these pages.
 
 data_match (1 to 5):
-- 5: its core business clearly involves this kind of data, with the buyer's features and
-  scenarios (e.g. multi-speaker meetings, not single-speaker dictation).
-- 4: clearly this kind of data, but only some of the features or scenarios.
+- 5: its core business clearly involves this kind of data, with the buyer's must-have and
+  nice-to-have details (e.g. multi-speaker meetings, not single-speaker dictation).
+- 4: clearly this kind of data, but only some of those details.
 - 3: adjacent data (e.g. phone calls when the buyer wants meetings), or plausible but
   unclear from these pages.
 - 2: a small side line, or a technology company that may hold some internal data.
@@ -110,9 +115,13 @@ there, offices or customers there, or data recorded there. Use the buyer's spell
 empty list if there's no evidence or the buyer named no regions.
 
 volume_signal (1 to 5, or null): signs of scale on these pages, such as customer or user
-counts, hours or calls processed, or a stated dataset size, judged against the buyer's
-volume. 5: clearly far more than the buyer needs; 3: substantial; 1: tiny. null if the
-pages give no sign of scale.
+counts, hours or calls processed, or a stated dataset size, judged against the volume
+wanted from one seller. 5: clearly more than that; 3: substantial; 1: tiny. null if the pages
+give no sign of scale.
+
+contradicts: keys from the must-have list that these pages clearly contradict, e.g.
+"modality" for a company that only handles text when audio is a must-have. Leave it empty
+when the pages just don't say.
 
 Return one result per organisation, using the domain exactly as given, with a one-line reason.
 
@@ -157,17 +166,21 @@ def _screen_batch(brief: Brief, batch: list[Fetched]) -> dict[str, ScreenItem]:
         for c, home, src in batch
     )
     prompt = PROMPT.format(
-        data_type=brief.data_type,
-        features=", ".join(brief.features) or "any",
+        brief=brief.summary("FR"),
         languages=", ".join(brief.languages) or "any",
         regions=", ".join(brief.regions) or "any",
-        scenarios=", ".join(brief.scenarios) or "any",
-        labels=", ".join(brief.label_types) or "none",
-        volume=str(brief.volume) or "not stated",
+        volume=brief.volume_wanted(),
+        musts=_musts(brief),
         companies=companies,
     )
     result = llm.ask(prompt, ScreenBatch, model=MODEL)
     return {item.domain.lower(): item for item in result.results}
+
+
+def _musts(brief: Brief) -> str:
+    lines = [f"- {k}: {CATEGORIES[k].label}: {brief.value_text(k)}"
+             for k in CATEGORIES if "F" in CATEGORIES[k].used_for and brief.must(k)]
+    return "\n".join(lines) or "(none)"
 
 
 def _buyers(wanted: list[str], said: list[str]) -> list[str]:
@@ -183,11 +196,17 @@ def _apply(brief: Brief, c: Candidate, item: ScreenItem) -> None:
     c.holder_type, c.data_owner = item.holder_type, item.data_owner
     c.languages = _buyers(brief.languages, item.languages)
     c.regions = _buyers(brief.regions, item.regions)
+    c.contradicts = [k for k in dict.fromkeys(item.contradicts) if k in CATEGORIES and brief.must(k)]
     if c.holder_type == "vendor" and c.data_owner == "customers":
         c.holder_type = "by_product"  # works on its clients' data: a service, not a data seller
     c.excluded = c.holder_type == "unrelated"
-    c.scores = Scores(data_match=clamp(item.data_match), volume=clamp(item.volume_signal))
-    rescore(c, brief)
+    if not c.excluded and not brief.accepts_holder(c.holder_type):
+        c.excluded, c.reason = True, f"{c.reason} (not a source type the buyer accepts)"
+    if (not c.excluded and c.data_owner == "customers" and brief.must("customer_data")
+            and CUSTOMER_EXCLUDE in brief.active("customer_data")):
+        c.excluded, c.reason = True, f"{c.reason} (holds its customers' data, which the buyer excludes)"
+    c.scores = Scores(data_match=max(1, min(5, item.data_match)))
+    rescore(c, brief, volume_signal=item.volume_signal)
 
 
 def is_dead_site(e: Exception) -> bool:

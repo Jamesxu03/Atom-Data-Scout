@@ -2,7 +2,16 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from worker.brief_template import (
+    CATEGORIES,
+    COMMERCIAL,
+    INTERNAL_ONLY,
+    OPEN,
+    RESTRICTED,
+    UNCLEAR,
+)
 
 
 class Evidence(BaseModel):
@@ -14,102 +23,9 @@ class Evidence(BaseModel):
 # or repository that publishes it (corpora, parliament recordings); by_product: its product or
 # service captures it in normal operation; technology: makes tools or hardware for it but
 # doesn't keep it at scale
-SourceType = Literal["vendor", "public", "by_product", "technology"]
-HolderType = Literal[SourceType, "unrelated"]
+HolderType = Literal["vendor", "public", "by_product", "technology", "unrelated"]
 DataOwner = Literal["company", "customers", "unclear"]
-Channel = Literal["product_search", "snowball", "directory", "marketplace", "public_source"]
-Licence = Literal["training_only", "commercial", "exclusive", "unknown"]
-
-SOURCE_LABELS = {
-    "vendor": "data vendors",
-    "public": "public sources",
-    "by_product": "by-product holders",
-    "technology": "technology companies",
-}
-LICENCE_LABELS = {
-    "training_only": "model training only",
-    "commercial": "commercial use",
-    "exclusive": "exclusive",
-    "unknown": "not stated",
-}
-
-
-class Volume(BaseModel):
-    amount: float | None = Field(description="e.g. 2000000; null if not stated")
-    unit: str | None = Field(description='e.g. "hours", "utterances", "data points", "GB"')
-
-    def __str__(self) -> str:
-        if self.amount is None:
-            return ""
-        amount = f"{self.amount:,.0f}" if self.amount == int(self.amount) else f"{self.amount:,}"
-        return f"{amount} {self.unit or ''}".strip()
-
-
-class Brief(BaseModel):
-    """What data the buyer wants: the standard template every search starts from."""
-
-    data_type: str = Field(description="e.g. multi-speaker meeting audio")
-    features: list[str] = Field(description="e.g. multi-speaker, overlapping speech, far-field")
-    scenarios: list[str] = Field(description="e.g. remote meetings, noisy offices")
-    languages: list[str] = Field(description="Languages or dialects, e.g. Gulf Arabic")
-    regions: list[str] = Field(description="Countries or regions, e.g. Middle East")
-    label_types: list[str] = Field(description="e.g. transcript, speaker diarization")
-    volume: Volume
-    formats: list[str] = Field(description="e.g. 16 kHz WAV")
-    licence: Licence
-    holder_types: list[SourceType] = Field(description="Kinds of source the buyer accepts")
-    exclusions: list[str] = Field(description="Company domains to skip, e.g. otter.ai")
-    must_have: list[str] = Field(description="Names of the fields above that are hard requirements")
-    notes: str = ""
-
-    def summary(self) -> str:
-        """One readable paragraph, shown on the results page and used in prompts."""
-        parts = [self.data_type[:1].upper() + self.data_type[1:]]
-        if self.features:
-            parts[0] += f" ({', '.join(self.features)})"
-        if self.languages:
-            parts.append(f"Languages: {', '.join(self.languages)}")
-        if self.regions:
-            parts.append(f"Regions: {', '.join(self.regions)}")
-        if self.scenarios:
-            parts.append(f"Scenarios: {', '.join(self.scenarios)}")
-        if self.label_types:
-            parts.append(f"Labels: {', '.join(self.label_types)}")
-        if str(self.volume):
-            parts.append(f"Volume: at least {self.volume}")
-        if self.formats:
-            parts.append(f"Formats: {', '.join(self.formats)}")
-        parts.append(f"Licence: {LICENCE_LABELS[self.licence]}")
-        if self.holder_types and set(self.holder_types) != set(SOURCE_LABELS):
-            parts.append(f"Sources accepted: {', '.join(SOURCE_LABELS[h] for h in self.holder_types)}")
-        if self.must_have:
-            parts.append(f"Must have: {', '.join(f.replace('_', ' ') for f in self.must_have)}")
-        if self.exclusions:
-            parts.append(f"Skip: {', '.join(self.exclusions)}")
-        if self.notes.strip():
-            parts.append(f"Notes: {self.notes.strip()}")
-        return ". ".join(parts) + "."
-
-
-# Fields a buyer can mark as hard requirements
-MUST_HAVE_FIELDS = [
-    "data_type", "features", "scenarios", "languages", "regions", "label_types", "volume",
-    "formats", "licence",
-]
-
-
-class FieldOptions(BaseModel):
-    field: str = Field(description="A Brief field name, e.g. languages")
-    options: list[str] = Field(description="2 to 5 alternative values the buyer might want")
-
-
-class BriefDraft(BaseModel):
-    """Output of the refine step: a filled-in brief plus what to check with the buyer."""
-
-    brief: Brief
-    suggested: list[str] = Field(description="Fields you filled in that the text did not state")
-    options: list[FieldOptions] = Field(description="Alternatives to show in the form")
-    questions: list[str] = Field(description="Open questions to check with the buyer")
+Channel = Literal["product_search", "snowball", "directory", "marketplace", "public_source", "distressed"]
 
 
 class HolderHypothesis(BaseModel):
@@ -158,20 +74,44 @@ class Scores(BaseModel):
     licence: int | None = None  # computed in Python
 
 
-LicenceStatus = Literal[
-    "sellable", "open", "open_restricted", "needs_consent", "internal_only", "unknown"
-]
+# What research found, in the same labels as D1 "Acceptable licence", plus internal use only
+LicenceFound = Literal.__getitem__(CATEGORIES["licence"].choices + (INTERNAL_ONLY,))
+# The categories research checks, besides licence and volume which have their own fields
+CheckedCategory = Literal.__getitem__(tuple(
+    k for k, c in CATEGORIES.items() if "V" in c.used_for and k not in ("licence", "volume")))
+
+
+class Check(BaseModel):
+    """One requirement from the brief, checked against public pages."""
+
+    category: CheckedCategory
+    verdict: Literal["meets", "fails", "unclear"]
+    finding: str = Field(description="One line: what the pages say")
+    evidence: list[Evidence]
+
+
+# Research saved before the D1 labels existed
+_OLD_STATUS = {"sellable": COMMERCIAL, "open": OPEN, "open_restricted": RESTRICTED,
+               "needs_consent": UNCLEAR, "internal_only": INTERNAL_ONLY, "unknown": UNCLEAR}
 
 
 class Research(BaseModel):
     """What checking one company in depth found. Every claim carries a verified quote."""
 
     data_held: str = Field(description="What data they hold: kind, formats, labels")
-    licence_status: LicenceStatus
+    licence: LicenceFound
     licence_evidence: list[Evidence]
     volume_estimate: str | None = Field(description="e.g. '40,000 hours of call recordings'")
     volume_score: int | None = Field(description="1 to 5 against the buyer's volume; null if unknown")
     volume_evidence: list[Evidence]
+    checks: list[Check] = Field(default=[], description="One per requirement listed under Checks")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade(cls, data):
+        if isinstance(data, dict) and "licence_status" in data and "licence" not in data:
+            data = {**data, "licence": _OLD_STATUS.get(data.pop("licence_status"), UNCLEAR)}
+        return data
 
 
 class EmailDraft(BaseModel):
@@ -201,7 +141,8 @@ class Candidate(BaseModel):
     regions: list[str] = Field(default=[], description="Buyer's regions it shows evidence of working in")
     scores: Scores = Scores()
     fit: float | None = None
-    excluded: bool = False  # dead site or unrelated
+    excluded: bool = False  # dead site, unrelated, or ruled out by a must-have filter
+    contradicts: list[str] = Field(default=[], description="Must-have categories the screen saw contradicted")
     # Filled on demand, for the companies the user selects
     research: Research | None = None
     contacts: list[Contact] = []

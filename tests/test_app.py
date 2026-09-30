@@ -4,24 +4,16 @@ import time
 
 from streamlit.testing.v1 import AppTest
 
-from tests.test_hypotheses import BRIEF
+from tests.test_hypotheses import BRIEF, brief_with
 from worker import pipeline, sessions
+from worker.brief_template import UNCLEAR, BriefDraft, Pick
 from worker.discovery import Discovery, Hit
-from worker.schemas import (
-    BriefDraft,
-    Candidate,
-    Contact,
-    EmailDraft,
-    Evidence,
-    FieldOptions,
-    Research,
-    Scores,
-)
+from worker.schemas import Candidate, Contact, EmailDraft, Evidence, Research, Scores
 from worker.steps import brief as brief_step
 from worker.steps import email as email_step
 
 OTTER_RESEARCH = Research(
-    data_held="customer meeting recordings", licence_status="needs_consent",
+    data_held="customer meeting recordings", licence=UNCLEAR,
     licence_evidence=[Evidence(quote="Customers own the recordings they make", url="https://otter.ai/terms")],
     volume_estimate="millions of meetings", volume_score=5,
     volume_evidence=[Evidence(quote="Over a billion meetings transcribed", url="https://otter.ai")],
@@ -66,9 +58,10 @@ def _button(at, label):
 
 
 def test_brief_form_search_and_one_ranked_table(monkeypatch):
-    monkeypatch.setattr(brief_step, "draft_brief", lambda text: BriefDraft(
-        brief=BRIEF, suggested=["regions"], options=[FieldOptions(field="languages", options=["Welsh"])],
-        questions=["Do accented speakers count?"]))
+    draft = BriefDraft(brief=brief_with(region=Pick(values=["Middle East (GCC)"], source="inferred"),
+                                        processing=Pick(values=["UK"])),
+                       questions=["Do accented speakers count?"])
+    monkeypatch.setattr(brief_step, "draft_brief", lambda text: draft)
     monkeypatch.setattr(pipeline, "search", _fake_search)
     at = AppTest.from_file("../app.py", default_timeout=30).run()
 
@@ -76,9 +69,17 @@ def test_brief_form_search_and_one_ranked_table(monkeypatch):
     _button(at, "Refine brief").click().run()
     assert not at.exception
     assert "Do accented speakers count?" in at.info[0].value  # open questions above the form
-    languages = next(m for m in at.multiselect if m.label == "Languages")
-    assert languages.value == ["English"] and "Welsh" in languages.options
-    assert [c.value for c in at.caption].count("suggested") == 1
+    languages = next(m for m in at.multiselect if m.label == "Languages and dialects")
+    assert languages.value == ["English"] and "Gulf Arabic" in languages.options  # suggested from the region
+    assert [c.value for c in at.caption].count("inferred — not stated in the brief") == 1
+    assert any("PDPL" in w.value for w in at.warning)  # Gulf origin, processed in the UK
+    titles = [e.label for e in at.expander]
+    assert "Audio/speech details" in titles and "Video/image details" not in titles  # add-ons follow A1
+
+    modality = at.button_group(key=f"{at.session_state.form_id}-modality")
+    modality.set_value(["Audio/speech", "Video"]).run()
+    assert "Video/image details" in [e.label for e in at.expander]
+    modality.set_value(["Audio/speech"]).run()
 
     _button(at, "Save and search").click().run()
     for _ in range(40):
@@ -97,14 +98,16 @@ def test_brief_form_search_and_one_ranked_table(monkeypatch):
     # one table by fit: below-threshold and excluded hidden, unknown fit last
     assert list(table.value["Company"]) == ["EgoData", "Otter", "Down"]
     assert list(table.value["Fit"]) == ["4.8", "4.0", "?"]
-    assert list(table.value["Licence"])[:2] == ["prior: likely sellable", "checked: needs consent"]
+    assert list(table.value["Licence"])[:2] == ["prior: likely sellable", "checked: Unclear"]
     research = _button(at, "Research selected")
     assert research.label == "Research selected (0)" and research.disabled
     assert any("not legal advice" in c.value for c in at.caption)
 
     # the session is listed in the sidebar and reopens from disk
-    ((_, meta),) = sessions.list_all()
+    ((path, meta),) = sessions.list_all()
     assert meta.relevant == 2 and meta.stage == "done"
+    saved = sessions.load(path).brief
+    assert saved.pick("region").source == "inferred" and saved.pick("modality").importance == "must"
     assert any(b.label.startswith(f"**{meta.name}**") for b in at.sidebar.button)
 
 
@@ -120,7 +123,7 @@ def test_reopen_session_research_panel_and_email(monkeypatch):
     next(b for b in at.sidebar.button if b.label.startswith("**Meeting audio**")).click().run()
     assert not at.exception
     assert [e.label for e in at.expander if e.label.startswith("Otter")] == [
-        "Otter — fit 4.0 — licence needs consent"]
+        "Otter — fit 4.0 — licence Unclear"]
     assert any("Customers own the recordings they make" in m.value for m in at.markdown)
 
     _button(at, "Draft email").click().run()
@@ -133,5 +136,6 @@ def test_reopen_session_research_panel_and_email(monkeypatch):
     assert sessions.load(s.path).discovery.candidates[1].email.subject == "Licensing meeting recordings"
 
     _button(at, "New session from this brief").click().run()
-    assert next(m for m in at.multiselect if m.label == "Languages").value == ["English"]
+    assert next(m for m in at.multiselect if m.label == "Languages and dialects").value == ["English"]
     assert at.text_input[0].value == "Meeting audio"
+    assert at.text_input[1].value == "multi-speaker meeting audio"
