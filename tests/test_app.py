@@ -9,13 +9,29 @@ from tests.test_hypotheses import BRIEF, brief_with
 from worker import pipeline, sessions
 from worker.brief_template import UNCLEAR, BriefDraft, Pick
 from worker.discovery import Discovery, Hit
-from worker.schemas import Candidate, Contact, EmailDraft, Evidence, Fact, Research, Scores
+from worker.schemas import (
+    Answer,
+    Candidate,
+    Contact,
+    EmailDraft,
+    Evidence,
+    Fact,
+    Research,
+    Saleability,
+    Scores,
+)
 from worker.steps import brief as brief_step
 from worker.steps import email as email_step
 
+CUSTOMERS_OWN = Evidence(quote="Customers own the recordings they make", url="https://otter.ai/terms")
 OTTER_RESEARCH = Research(
-    data_held="customer meeting recordings", licence=UNCLEAR,
-    licence_evidence=[Evidence(quote="Customers own the recordings they make", url="https://otter.ai/terms")],
+    data_held="customer meeting recordings", licence=UNCLEAR, licence_evidence=[],
+    saleability=Saleability(
+        exists=Answer(score=5, reason="kept until the customer deletes it", verified=True, evidence=[
+            Evidence(quote="Recordings are kept until you delete them", url="https://otter.ai/privacy")]),
+        allowed=Answer(score=2, reason="its customers own the recordings", verified=True, evidence=[CUSTOMERS_OWN]),
+        willing=Answer(score=None, reason="nothing found"),
+        obstacle="customers own the recordings", path="needs its customers' consent"),
     volume_estimate="millions of meetings", volume_score=5,
     volume_evidence=[Evidence(quote="Over a billion meetings transcribed", url="https://otter.ai")],
 )
@@ -27,11 +43,10 @@ def _candidates() -> list[Candidate]:
                          source_urls=[], **kw)
 
     return [
-        cand("EgoData", "egodata.example", reason="sells data", holder_type="seller", data_owner="company",
-             collects_to_order=True,
+        cand("EgoData", "egodata.example", reason="sells data", holder_type="ready", data_owner="company",
              scores=Scores(data_match=5, coverage=5, licence=4), fit=4.8),
         cand("Otter", "otter.ai", reason="AI notetaker", holder_type="untapped", data_owner="customers",
-             archetype="service", selling_status="open_to_it",
+             saleability=Saleability(exists=Answer(score=4), allowed=Answer(score=4), willing=Answer(score=3)),
              languages=["English"], scores=Scores(data_match=5, coverage=5, licence=2, volume=5), fit=4.0,
              research=OTTER_RESEARCH,
              contacts=[Contact(email="privacy@otter.ai", role="Privacy / DPO inbox",
@@ -39,7 +54,7 @@ def _candidates() -> list[Candidate]:
         cand("Lowfit", "lowfit.example", reason="adjacent", holder_type="untapped", data_owner="company",
              scores=Scores(data_match=2, coverage=1, licence=3), fit=1.9),
         cand("Down", "down.example", reason="homepage unreachable (ConnectError)"),
-        cand("Payroll Co", "payroll.example", reason="HR", holder_type="unrelated", data_owner="unclear",
+        cand("Payroll Co", "payroll.example", reason="HR", holder_type=None, data_owner="unclear",
              scores=Scores(data_match=1), fit=1.0, excluded=True),
     ]
 
@@ -101,11 +116,11 @@ def test_brief_form_search_and_one_ranked_table(monkeypatch):
     # one table by fit: below-threshold and excluded hidden, unknown fit last
     assert list(table.value["Company"]) == ["EgoData", "Otter", "Down"]
     assert list(table.value["Fit"]) == ["4.8", "4.0", "?"]
-    assert list(table.value["Licence"])[:2] == ["prior: likely sellable", "checked: Unclear"]
-    assert list(table.value["Type"])[:2] == ["Seller + collects",
-                                             "Untapped holder · Service by-product · open to selling"]
-    assert next(m for m in at.multiselect if m.label == "Why untapped holders have it").options == [
-        "Service by-product"]
+    # Otter: exists 5 and allowed 2 verified by research, willing 3 still the screen's
+    assert list(table.value["Saleability"])[:2] == ["prior: offered, licence not checked", "Low (initial)"]
+    assert list(table.value["Type"])[:2] == ["Ready source", "Untapped"]
+    assert list(table.value["Obstacle → how to buy"])[:2] == [
+        "", "customers own the recordings → needs its customers' consent"]
     research = _button(at, "Research selected")
     assert research.label == "Research selected (0)" and research.disabled
     assert any("not legal advice" in c.value for c in at.caption)
@@ -130,8 +145,11 @@ def test_reopen_session_research_panel_and_email(monkeypatch):
     next(b for b in at.sidebar.button if b.label.startswith("**Meeting audio**")).click().run()
     assert not at.exception
     assert [e.label for e in at.expander if e.label.startswith("Otter")] == [
-        "Otter — fit 4.0 — licence Unclear"]
+        "Otter — fit 4.0 — Low (initial)"]
     assert any("Customers own the recordings they make" in m.value for m in at.markdown)
+    assert any(m.value.startswith("- **Allowed?** 2/5 (verified)") for m in at.markdown)
+    assert any(m.value.startswith("- **Willing?** 3/5 (initial)") for m in at.markdown)
+    assert any(m.value == "**How to buy it:** needs its customers' consent" for m in at.markdown)
 
     _button(at, "Draft email").click().run()
     assert not at.exception

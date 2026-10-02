@@ -1,6 +1,12 @@
-"""Scores and fit, computed in Python. The model only supplies data_match, a volume signal and
-contradicted must-haves (screen), and the licence found, a volume score and checks (research);
-everything else is a rule here.
+"""Scores and fit, computed in Python. The model only supplies data_match, a volume signal,
+contradicted must-haves and initial saleability answers (screen), and the licence found, a volume
+score, checks and verified saleability answers (research); everything else is a rule here.
+
+The licence score depends on the holder type:
+- ready source: 4 until research finds its licence, then 5 if D1 accepts it, otherwise 1
+- untapped holder: its saleability grade, the lowest of three answers (does the data exist, is
+  selling it allowed, are they willing), because all three must hold for a purchase. A grade of
+  1 or 2 also caps the fit.
 
 How importance works (see worker/brief_template.py):
 - must: counted in the score, and the fit is capped when evidence contradicts it
@@ -22,11 +28,12 @@ from worker.brief_template import (
 from worker.config import (
     FIT_WEIGHTS,
     INTERNAL_ONLY_CAP,
+    LOW_SALEABILITY_CAP,
     MUST_HAVE_CAP,
+    NOT_SELLABLE_CAP,
     RELEVANT_FIT,
-    TECHNOLOGY_CAP,
 )
-from worker.schemas import Candidate
+from worker.schemas import SALEABILITY_QUESTIONS, Candidate
 
 
 def clamp(score: int | None) -> int | None:
@@ -43,44 +50,51 @@ def coverage(brief: Brief, languages: list[str], regions: list[str]) -> int | No
     return 5 if hits == len(named) else 3 if hits else 1
 
 
-# Before research: how likely the data can be licensed, from what the screen saw
-_PRIORS: dict[tuple[str, str | None], tuple[int, str]] = {
-    ("seller", "company"): (4, "likely sellable"),
-    ("untapped", "company"): (3, "may be licensable"),
-    ("untapped", "customers"): (2, "likely needs consent"),
-}
+GRADES = {5: "High", 4: "High", 3: "Medium", 2: "Low", 1: "Not sellable"}
+READY_PRIOR = 4  # a ready source offers the data; research then checks its licence against D1
 
 
-def _prior(c: Candidate) -> tuple[int | None, str]:
-    if c.holder_type == "public":
-        return 3, "likely open or restricted"
-    if c.holder_type == "technology":
-        return 2, "likely internal data only"
-    if c.holder_type == "collector":
-        return 4, "commissioned data, rights negotiable"
-    if c.holder_type == "untapped" and c.archetype == "kept_by_law":
-        return 2, "kept to meet regulation, likely needs consent"
-    score, label = _PRIORS.get((c.holder_type, c.data_owner), (None, "owner unclear"))
-    if c.selling_status == "open_to_it" and score is not None:
-        return min(5, score + 1), f"{label}, open to selling"
-    return score, label
-
-
-def prior_label(c: Candidate) -> str:
-    return _prior(c)[1]
-
-
-def licence_prior(c: Candidate, brief: Brief) -> int | None:
-    """D6 decides what data held for customers is worth: needing consent (2), nothing (1), or
-    left to check later (neutral). Not for collectors: they record new data for us."""
-    score = _prior(c)[0]
-    if c.data_owner == "customers" and c.holder_type != "collector":
+def answers(c: Candidate, brief: Brief) -> dict[str, int | None]:
+    """The three saleability scores (research's where verified, otherwise the screen's). Data its
+    customers own is at most 2 on "allowed" (it needs their consent), or 1 if D6 excludes it;
+    D6 "accept, check later" leaves the answer as it is."""
+    s = c.current_saleability()
+    scores = {q: clamp(getattr(s, q).score) if s else None for q in SALEABILITY_QUESTIONS}
+    if c.data_owner == "customers":
         d6 = brief.active("customer_data")
         if CUSTOMER_EXCLUDE in d6:
-            return 1
-        if d6 and CUSTOMER_CONSENT not in d6:  # accept, check later
-            return None
-    return score
+            scores["allowed"] = 1
+        elif not d6 or CUSTOMER_CONSENT in d6:
+            scores["allowed"] = min(scores["allowed"] or 2, 2)
+    return scores
+
+
+def grade(c: Candidate, brief: Brief) -> int | None:
+    """The lowest known answer; None if all three are unknown. With only one answer known the
+    grade is at most 3 (medium): one good answer says little about the other two."""
+    known = [v for v in answers(c, brief).values() if v is not None]
+    if not known:
+        return None
+    return min(known) if len(known) >= 2 else min(min(known), 3)
+
+
+def is_verified(c: Candidate) -> bool:
+    """Every known answer has a quote research found on the cited page."""
+    s = c.current_saleability()
+    known = [a for q in SALEABILITY_QUESTIONS if s and (a := getattr(s, q)).score is not None]
+    return bool(known) and all(a.verified for a in known)
+
+
+def saleability_label(c: Candidate, brief: Brief) -> str:
+    """What the Saleability column shows."""
+    if c.holder_type == "ready":
+        if c.research:
+            return f"checked: {c.research.licence}"
+        return "prior: records to order" if c.collector else "prior: offered, licence not checked"
+    if c.holder_type == "untapped":
+        g = grade(c, brief)
+        return "Unknown" if g is None else f"{GRADES[g]} ({'verified' if is_verified(c) else 'initial'})"
+    return "?"
 
 
 def licence_acceptable(found: str, brief: Brief) -> bool | None:
@@ -111,16 +125,16 @@ def must_failures(c: Candidate, brief: Brief) -> list[str]:
     fails += [k for k in c.contradicts if brief.must(k)]
     if r := c.research:
         fails += [ch.category for ch in r.checks if ch.verdict == "fails" and brief.must(ch.category)]
-        if brief.must("licence"):
+        if brief.must("licence") and c.holder_type == "ready":  # untapped holders: saleability instead
             unclear_refused = r.licence == UNCLEAR and UNCLEAR not in brief.active("licence")
             if licence_acceptable(r.licence, brief) is False or unclear_refused:
                 fails.append("licence")
     if brief.must("volume") and c.scores.volume == 1:
         fails.append("volume")
-    if (brief.must("customer_data") and c.data_owner == "customers" and c.holder_type != "collector"
+    if (brief.must("customer_data") and c.data_owner == "customers" and c.holder_type == "untapped"
             and CUSTOMER_EXCLUDE in brief.active("customer_data")):
         fails.append("customer_data")
-    if c.holder_type == "collector" and brief.must("delivery") and CUSTOM_COLLECTION not in brief.active("delivery"):
+    if c.collector and brief.must("delivery") and CUSTOM_COLLECTION not in brief.active("delivery"):
         fails.append("delivery")  # the buyer wants existing data, not data recorded to order
     return list(dict.fromkeys(fails))
 
@@ -133,29 +147,39 @@ def fit(c: Candidate, brief: Brief) -> float | None:
     value = sum(FIT_WEIGHTS[k] * v for k, v in known.items()) / sum(FIT_WEIGHTS[k] for k in known)
     if must_failures(c, brief):
         value = min(value, MUST_HAVE_CAP)
-    if c.holder_type == "technology":
-        value = min(value, TECHNOLOGY_CAP)
-    if c.research and c.research.licence == INTERNAL_ONLY:
+    if c.holder_type == "untapped" and (g := grade(c, brief)) is not None and g <= 2:
+        value = min(value, NOT_SELLABLE_CAP if g == 1 else LOW_SALEABILITY_CAP)
+    if c.holder_type == "ready" and c.research and c.research.licence == INTERNAL_ONLY:
         value = min(value, INTERNAL_ONLY_CAP)
     return round(value, 2)
 
 
+def licence_score(c: Candidate, brief: Brief) -> int | None:
+    """The licence slot of fit: the saleability grade for untapped holders, the licence for ready
+    sources (ignored when D1 is set to Any, unless research found it is for internal use only)."""
+    if c.holder_type == "untapped":
+        return grade(c, brief)
+    if c.holder_type != "ready":
+        return None
+    found = c.research.licence if c.research else None
+    if found == INTERNAL_ONLY:
+        return 1
+    if brief.importance("licence") == "any":
+        return None
+    checked = licence_from_found(found, brief) if found else None
+    return checked if checked is not None else READY_PRIOR
+
+
 def rescore(c: Candidate, brief: Brief, volume_signal: int | None = None) -> None:
     """Recompute coverage, licence, volume and fit (in place). Research, where done, replaces the
-    licence prior and the screen's volume signal; a research result with no verified evidence
-    leaves them as they were. Categories set to Any count for nothing."""
+    ready-source prior, the screen's saleability answers and its volume signal; anything research
+    couldn't verify leaves them as they were. Categories set to Any count for nothing."""
     c.scores.coverage = coverage(brief, c.languages, c.regions)
-    c.scores.licence = licence_prior(c, brief)
+    c.scores.licence = licence_score(c, brief)
     if volume_signal is not None:
         c.scores.volume = clamp(volume_signal)
-    if c.research:
-        checked = licence_from_found(c.research.licence, brief)
-        if checked is not None:
-            c.scores.licence = checked
-        if c.research.volume_score is not None:
-            c.scores.volume = clamp(c.research.volume_score)
-    if brief.importance("licence") == "any" and not (c.research and c.research.licence == INTERNAL_ONLY):
-        c.scores.licence = None
+    if c.research and c.research.volume_score is not None:
+        c.scores.volume = clamp(c.research.volume_score)
     if brief.importance("volume") == "any":
         c.scores.volume = None
     c.fit = fit(c, brief)

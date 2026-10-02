@@ -1,29 +1,30 @@
 """Screen: homepage + the page search found the company on, one Flash call per batch -> the
-holder type (seller / collector / untapped holder / public / technology / unrelated), who
-owns the data, for untapped holders why they hold it (archetype) and whether they seem open to
-selling, how
-well it matches the brief (1 to 5), evidence for the buyer's languages and regions, signs
-of scale, and any price, founding year or data period the pages state (kept only with a quote
-found on the page). Scores and fit are then computed in Python (see scoring.py).
+holder type (ready source / untapped holder, or unrelated), who owns the data, how well it
+matches the brief (1 to 5), evidence for the buyer's languages and regions, signs of scale, any
+price, founding year or data period the pages state (kept only with a quote found on the page),
+and for untapped holders initial answers to the three saleability questions (does the data
+exist, is selling it allowed, are they willing), the main obstacle and how to buy it anyway.
+Scores and fit are then computed in Python (see scoring.py); research later checks the answers
+against news and the company's own policies.
 
 Rules the model doesn't apply reliably are enforced afterwards (see _apply): only the
-buyer's languages and regions count, only must-have categories can be contradicted, a
-"seller" whose data belongs to its customers is a service, so an untapped holder, and archetype
-and selling status apply to untapped holders only. Unrelated companies, dead websites and
-companies a must-have filter rules out (E1 source types, D6 customers' data) are excluded.
+buyer's languages and regions count, only must-have categories can be contradicted, a ready
+source whose data belongs to its customers is a service, so an untapped holder, and saleability
+applies to untapped holders only. Unrelated companies, dead websites and companies a must-have
+filter rules out (E1 source types, D6 customers' data) are excluded.
 """
 
 import re
 import socket
 from collections.abc import Callable
+from typing import Literal
 from urllib.parse import urlparse
 
 import httpx
 import trafilatura
 from pydantic import BaseModel, Field
 
-from worker import archetypes, llm
-from worker.archetypes import ArchetypeKey
+from worker import llm
 from worker.brief_template import CATEGORIES, CUSTOMER_EXCLUDE, Brief
 from worker.config import (
     MODEL,
@@ -36,7 +37,7 @@ from worker.crawl import fetch_homepage_text, fetch_html_quick, same_site
 from worker.discovery.channels import GROUNDING_REDIRECT, mention_at
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
-from worker.schemas import FACTS, Candidate, DataOwner, Fact, HolderType, Scores, SellingStatus
+from worker.schemas import FACTS, Answer, Candidate, DataOwner, Fact, Saleability, Scores
 from worker.scoring import rescore
 from worker.verify import MIN_FACT_QUOTE_WORDS, quote_in_text, value_in_quote
 
@@ -48,11 +49,14 @@ class Stated(BaseModel):
 
 class ScreenItem(BaseModel):
     domain: str
-    holder_type: HolderType
+    holder_type: Literal["ready", "untapped", "unrelated"]
     data_owner: DataOwner = Field(description="Who controls the data this company holds")
-    collects_to_order: bool = Field(default=False, description="Offers to record or collect this data to order")
-    archetype: ArchetypeKey | None = Field(default=None, description="Untapped holders only")
-    selling_status: SellingStatus | None = Field(default=None, description="Untapped holders only")
+    collector: bool = Field(default=False, description="Ready source that only records to order")
+    exists: int | None = Field(default=None, description="Untapped only: 1 to 5, null if the pages don't say")
+    allowed: int | None = Field(default=None, description="Untapped only: 1 to 5, null if the pages don't say")
+    willing: int | None = Field(default=None, description="Untapped only: 1 to 5, null if the pages don't say")
+    obstacle: str | None = Field(default=None, description="Untapped only: the main obstacle, one line")
+    path: str | None = Field(default=None, description="Untapped only: how it could still be bought")
     data_match: int = Field(description="1 to 5: how closely its data matches the buyer's")
     languages: list[str] = Field(description="The buyer's languages it shows evidence of working in")
     regions: list[str] = Field(description="The buyer's regions it shows evidence of working in")
@@ -89,42 +93,40 @@ it holds, how well its data matches, which of the buyer's languages and regions 
 and how much data it is likely to hold.
 
 holder_type:
-- "seller": already holds this kind of data and sells or licenses it: a dataset catalogue,
-  off-the-shelf datasets, marketplace listings, "license our data". Its data is its own. If it
-  also collects to order, it is still a seller (set collects_to_order).
-- "collector": records, collects or annotates this kind of data to a client's specification as
-  a service (collection campaigns, crowdsourced recording, annotation), with no matching
-  off-the-shelf data on these pages.
-- "untapped": holds this kind of data because of what it does, but doesn't sell it: its
-  product or service records it, the law makes it keep it, it has production leftovers, it
-  closed or was acquired, its devices record it, and so on (see archetype). Includes agencies
-  that transcribe, translate, interpret or record their clients' material.
-- "public": a public body, research institute, university or non-profit repository that
-  records, publishes or distributes this kind of data (e.g. corpora, parliament or council
-  session recordings, broadcast archives).
-- "technology": makes hardware, software or tools that work with this kind of data (e.g.
-  sensors, devices, tracking or analysis software) but doesn't itself capture or keep it at
-  scale. At most it holds internal R&D or training data.
-- "unrelated": none of the above, including companies that capture a different kind of data
-  from what the buyer wants, and sites that only list or write about others (a directory,
-  news site, consultancy, marketplace).
+- "ready": the data is already offered: it sells or licenses this kind of data (a dataset
+  catalogue, off-the-shelf datasets, a marketplace listing), publishes it (a public body,
+  research institute or repository: corpora, parliament or broadcast archives), or records
+  it to a client's specification as a service (a data collector). Its data is its own.
+- "untapped": holds this kind of data, or could, but doesn't sell it: its product or service
+  records it, the law makes it keep it, it has production leftovers, it closed or was
+  acquired, its devices record it, and so on. Includes agencies that transcribe, translate,
+  interpret or record their clients' material, and makers of tools or hardware for this kind
+  of data, who at most hold internal R&D data.
+- "unrelated": neither, including companies that capture a different kind of data from what
+  the buyer wants, and sites that only list or write about others (a directory, news site,
+  consultancy, marketplace).
 
 data_owner:
 - "company": the organisation recorded or collected the data itself (its own staff,
-  contractors or devices), so it could license it. Always the case for a seller.
+  contractors or devices), so it could license it. Always the case for a ready source.
 - "customers": the data is recorded by or for its customers, who own it; licensing it would
   need their permission.
 - "unclear": can't tell from these pages.
 
-collects_to_order: true if it offers to record or collect this kind of data to a client's
-specification (a collector always does; a seller sometimes does).
+collector: true for a ready source that records data to order and shows no existing data.
 
-archetype (untapped holders only, otherwise null): why it holds the data, one of:
-{archetypes}
-
-selling_status (untapped holders only, otherwise null): "open_to_it" if these pages mention
-data partnerships, licensing its data or AI training data; "not_selling" if nothing suggests
-it; "unclear" if you can't tell.
+For untapped holders only (null for others), answer three questions from these pages, each 1
+to 5, or null when the pages don't say:
+- exists: is the data still there? 5: kept long term, an archive; 1: deleted within 30 days,
+  or it doesn't record at all. How much there is goes in volume_signal, not here.
+- allowed: may it be sold? 5: the company recorded it itself and its terms allow other uses;
+  1: copyright belongs to someone else, terms say recordings are only for quality monitoring
+  and never shared, or it is health data or recordings kept for financial regulation.
+- willing: would they sell? 5: insolvent, shutting down, selling assets, or has done data
+  deals with AI companies; 1: a big brand, or a strictly regulated institution.
+obstacle: the main thing in the way, in one line (e.g. "terms say recordings are only used for
+quality monitoring"). path: how it could still be bought, if there is a way (e.g. "needs its
+customers' consent", "contact the administrators"); null if none.
 
 data_match (1 to 5):
 - 5: its core business clearly involves this kind of data, with the buyer's must-have and
@@ -132,7 +134,7 @@ data_match (1 to 5):
 - 4: clearly this kind of data, but only some of those details.
 - 3: adjacent data (e.g. phone calls when the buyer wants meetings), or plausible but
   unclear from these pages.
-- 2: a small side line, or a technology company that may hold some internal data.
+- 2: a small side line, or a tool or hardware maker that may hold some internal data.
 - 1: a different kind of data, or none.
 
 languages: which of the buyer's languages the organisation shows evidence of working in: its
@@ -211,7 +213,6 @@ def _screen_batch(brief: Brief, batch: list[Fetched]) -> dict[str, ScreenItem]:
         regions=", ".join(brief.regions) or "any",
         volume=brief.volume_wanted(),
         musts=_musts(brief),
-        archetypes=archetypes.guide(brief.chosen("modality")),
         companies=companies,
     )
     result = llm.ask(prompt, ScreenBatch, model=MODEL)
@@ -256,17 +257,17 @@ def _apply(brief: Brief, c: Candidate, item: ScreenItem, home: str = "", src: st
     c.regions = _buyers(brief.regions, item.regions)
     _stated_facts(c, item, home, src)
     c.contradicts = [k for k in dict.fromkeys(item.contradicts) if k in CATEGORIES and brief.must(k)]
-    c.collects_to_order = item.collects_to_order or c.holder_type == "collector"
-    if c.holder_type == "seller" and c.data_owner == "customers":
+    c.collector = item.collector and item.holder_type == "ready"
+    if item.holder_type == "unrelated":
+        c.holder_type, c.excluded = None, True
+    elif item.holder_type == "ready" and c.data_owner == "customers" and not c.collector:
         c.holder_type = "untapped"  # works on its clients' data: a service, not a data seller
-    untapped = c.holder_type == "untapped"
-    c.archetype = (item.archetype or "service") if untapped else None
-    c.selling_status = (item.selling_status or "unclear") if untapped else None
-    c.excluded = c.holder_type == "unrelated"
+    if c.holder_type == "untapped":
+        c.saleability = Saleability(**{q: Answer(score=getattr(item, q)) for q in ("exists", "allowed", "willing")},
+                                    obstacle=item.obstacle, path=item.path)
     if not c.excluded and not brief.accepts_holder(c.holder_type):
         c.excluded, c.reason = True, f"{c.reason} (not a source type the buyer accepts)"
-    # a collector records new data for us, so whose its past clients' data is doesn't matter
-    if (not c.excluded and c.data_owner == "customers" and c.holder_type != "collector"
+    if (not c.excluded and c.data_owner == "customers" and c.holder_type == "untapped"
             and brief.must("customer_data") and CUSTOMER_EXCLUDE in brief.active("customer_data")):
         c.excluded, c.reason = True, f"{c.reason} (holds its customers' data, which the buyer excludes)"
     c.scores = Scores(data_match=max(1, min(5, item.data_match)))

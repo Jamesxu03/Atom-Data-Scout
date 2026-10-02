@@ -29,7 +29,7 @@ SEEDS_CSV = Path(__file__).parent / "seed_companies.csv"
 class Seed(BaseModel):
     name: str
     website: str = ""
-    type: str = ""  # expected holder type: seller, collector, untapped, public, technology
+    type: str = ""  # expected holder type: ready or untapped
     notes: str = ""
 
 

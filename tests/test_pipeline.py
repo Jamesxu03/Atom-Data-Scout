@@ -5,7 +5,7 @@ from tests.test_hypotheses import BRIEF
 from worker import pipeline, sessions
 from worker.crawl import CrawlResult, Page
 from worker.discovery.domains import normalize_domain
-from worker.schemas import Evidence, FoundList, Research
+from worker.schemas import Answer, Evidence, FoundList, Research, Saleability
 from worker.steps.contacts import FoundContact, FoundContacts
 from worker.steps.hypotheses import HypothesisList
 from worker.steps.screen import ScreenBatch, ScreenItem
@@ -18,7 +18,7 @@ def _otter_good_rest_unrelated(prompt: str) -> ScreenBatch:
     return ScreenBatch(results=[
         ScreenItem(domain=d, holder_type="untapped" if d == "otter.ai" else "unrelated",
                    data_owner="company", data_match=5 if d == "otter.ai" else 1, languages=["English"],
-                   regions=[], volume_signal=4, reason="r")
+                   regions=[], volume_signal=4, reason="r", exists=4, allowed=4, willing=3)
         for d in domains
     ])
 
@@ -72,10 +72,16 @@ def test_research_covers_only_selected_and_rescores(fake_ask, monkeypatch):
         FoundContact(name="Made Up", role="CEO", email="made.up@otter.ai", phone=None,
                      linkedin_url=None, source_url="https://otter.ai/team"),
     ])
+    internal = Evidence(quote="Recordings are only used internally by Otter", url="https://otter.ai")
     fake_ask.responses[Research] = Research(
-        data_held="meeting recordings", licence="Internal use only",
-        licence_evidence=[Evidence(quote="Recordings are only used internally by Otter", url="https://otter.ai")],
-        volume_estimate=None, volume_score=None, volume_evidence=[])
+        data_held="meeting recordings", licence="Unclear", licence_evidence=[],
+        volume_estimate=None, volume_score=None, volume_evidence=[],
+        saleability=Saleability(
+            exists=Answer(score=5, reason="kept for years", evidence=[
+                Evidence(quote="Otter keeps every recording for ten years", url="https://news.example/otter")]),
+            allowed=Answer(score=1, reason="terms say internal use only", evidence=[internal]),
+            willing=Answer(score=None, reason="nothing found"),
+            obstacle="Terms say recordings are only used internally"))
     crawled = []
 
     def fake_crawl(url):
@@ -87,8 +93,13 @@ def test_research_covers_only_selected_and_rescores(fake_ask, monkeypatch):
     assert crawled == ["https://otter.ai"]
     assert len(fake_ask.calls_for(Research)) == 1 and len(fake_ask.calls_for(FoundContacts)) == 1
     otter = next(c for c in s.discovery.candidates if c.domain == "otter.ai")
-    assert otter.research.licence == "Internal use only"
-    assert otter.scores.licence == 1 and otter.fit == 2.0 < before  # re-scored and capped
+    sal = otter.current_saleability()
+    # allowed: verified on the crawled page; exists: the news page can't be fetched in tests, so
+    # it falls back to the screen's initial 4; willing: research found nothing, screen said 3
+    assert (sal.allowed.score, sal.allowed.verified) == (1, True)
+    assert (sal.exists.score, sal.exists.verified, sal.willing.score) == (4, False, 3)
+    assert sal.obstacle == "Terms say recordings are only used internally"
+    assert otter.scores.licence == 1 and otter.fit == 2.0 < before  # grade "not sellable" caps the fit
     assert [(k.email, k.verified) for k in otter.contacts] == [
         ("ceo@otter.ai", True),  # from the website
         ("made.up@otter.ai", False),  # search result not found on its source page

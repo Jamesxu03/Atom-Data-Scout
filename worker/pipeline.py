@@ -2,8 +2,9 @@
 
   search()    brief -> hypotheses -> discovery -> source checks + screen -> snowball
               -> source checks + screen -> one list ranked by fit
-  research()  for the companies the user selects: deep crawl, research (licence, volume,
-              data held) and contacts, then re-score and re-rank
+  research()  for the companies the user selects: deep crawl, research (licence for ready
+              sources, saleability from news and policies for untapped holders, volume, data
+              held) and contacts, then re-score and re-rank
 
 Independent calls run in parallel. If the Gemini quota runs out mid-job, everything gathered
 so far is saved and the session is marked partial instead of being lost.
@@ -22,8 +23,8 @@ from worker.crawl import CrawlResult, crawl
 from worker.discovery import Discovery, check_sources, discover, pick_seeds, seed_types, snowball
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
-from worker.schemas import FACTS, Candidate, Funnel
-from worker.scoring import is_relevant, must_failures, rank, rescore
+from worker.schemas import FACTS, SALEABILITY_QUESTIONS, Candidate, Funnel
+from worker.scoring import answers, is_relevant, must_failures, rank, rescore, saleability_label
 from worker.sessions import Session
 from worker.steps.contacts import find_contacts
 from worker.steps.hypotheses import hypotheses
@@ -131,8 +132,6 @@ def research(
         errors = [f"{c.domain}: crawl {e}" for e in cr.errors if e.startswith("homepage")]
         progress(f"Researching {c.domain}")
         c.research = research_company(brief, c, cr)
-        if c.holder_type == "untapped" and c.research.selling_evidence:  # verified: replaces the screen's guess
-            c.selling_status = c.research.selling_status
         progress(f"Finding contacts: {c.domain}")
         try:
             c.contacts = find_contacts(c, cr)
@@ -184,13 +183,17 @@ def contacts_csv(candidates: list[Candidate]) -> str:
 def candidates_csv(candidates: list[Candidate], brief: Brief) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["name", "domain", "website", "fit", "holder_type", "data_owner", "data_match", "coverage",
-                "volume", "licence", "licence_found", *FACTS, "must_haves_not_met", "languages", "regions", "reason",
-                "excluded", "channels", "source_verified", "source_urls"])
+    w.writerow(["name", "domain", "website", "fit", "holder_type", "collector", "data_owner", "data_match",
+                "coverage", "volume", "licence", "licence_found", "saleability", *SALEABILITY_QUESTIONS, "obstacle",
+                "path", *FACTS, "must_haves_not_met", "languages", "regions", "reason", "excluded", "channels",
+                "source_verified", "source_urls"])
     for c in candidates:
-        s = c.scores
-        w.writerow([c.name, c.domain, c.website, c.fit, c.holder_type, c.data_owner, s.data_match, s.coverage,
-                    s.volume, s.licence, c.research.licence if c.research else None,
+        s, sale = c.scores, c.current_saleability()
+        untapped = c.holder_type == "untapped"
+        scores = answers(c, brief) if untapped else dict.fromkeys(SALEABILITY_QUESTIONS)
+        w.writerow([c.name, c.domain, c.website, c.fit, c.holder_type, c.collector, c.data_owner, s.data_match,
+                    s.coverage, s.volume, s.licence, c.research.licence if c.research else None,
+                    saleability_label(c, brief), *scores.values(), sale and sale.obstacle, sale and sale.path,
                     *((f.value if (f := c.fact(k)) else None) for k in FACTS),
                     ", ".join(must_failures(c, brief)),
                     ", ".join(c.languages), ", ".join(c.regions), c.reason, c.excluded,

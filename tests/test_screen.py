@@ -2,8 +2,8 @@ import httpx
 import pytest
 
 from tests.test_hypotheses import BRIEF, brief_with
-from worker.brief_template import CUSTOMER_EXCLUDE, SELLERS, Pick
-from worker.config import MUST_HAVE_CAP, SCREEN_BATCH_SIZE, TECHNOLOGY_CAP
+from worker.brief_template import CUSTOMER_EXCLUDE, READY, Pick
+from worker.config import MUST_HAVE_CAP, NOT_SELLABLE_CAP, SCREEN_BATCH_SIZE
 from worker.schemas import Candidate
 from worker.scoring import is_relevant, rank
 from worker.steps.screen import ScreenBatch, ScreenItem, Stated, screen, source_excerpt
@@ -16,8 +16,9 @@ def _cand(domain):
 
 def _score_by_prefix(prompt):
     """good-* -> data_match 5, mid-* -> 3, else 1 and unrelated; skips 'silent-*' to test missing
-    answers. Evidence for English unless the domain has 'nolang'; 'tech' in the domain makes it
-    a technology company."""
+    answers. Evidence for English unless the domain has 'nolang'. Untapped holders answer
+    exists 4, allowed 4, willing 3 (grade 3), except 'tech' ones: a tool maker that doesn't keep
+    the data (exists 1)."""
     items = []
     for line in prompt.splitlines():
         if line.startswith("### "):
@@ -25,10 +26,11 @@ def _score_by_prefix(prompt):
             if domain.startswith("silent"):
                 continue
             match = {"good": 5, "mid": 3}.get(domain.split("-")[0], 1)
-            holder = "technology" if "tech" in domain else "unrelated" if match == 1 else "untapped"
+            holder = "unrelated" if match == 1 else "untapped"
             items.append(ScreenItem(domain=domain.upper(), holder_type=holder, data_owner="company",
                                     data_match=match, languages=[] if "nolang" in domain else ["english"],
-                                    regions=[], volume_signal=None, reason=f"because {domain}"))
+                                    regions=[], volume_signal=None, reason=f"because {domain}",
+                                    exists=1 if "tech" in domain else 4, allowed=4, willing=3))
     return ScreenBatch(results=items)
 
 
@@ -143,11 +145,12 @@ def test_rank_by_fit_then_corroboration():
     assert order == ["vendor.com", "famous.com", "niche.com", "unknown.com", "dropped.com"]
 
 
-def test_technology_company_is_capped(fake_ask):
+def test_tool_maker_without_the_data_is_not_sellable(fake_ask):
     fake_ask.responses[ScreenBatch] = _score_by_prefix
-    tech = _cand("good-tech.com")  # model says a perfect match, but it sells software, not recordings
+    tech = _cand("good-tech.com")  # pages are all about the data type, but it doesn't keep any
     screen(BRIEF, [tech], fetch=lambda _: "text", progress=lambda _: None)
-    assert tech.holder_type == "technology" and tech.fit == TECHNOLOGY_CAP
+    assert tech.holder_type == "untapped" and tech.saleability.exists.score == 1
+    assert tech.scores.licence == 1 and tech.fit == NOT_SELLABLE_CAP
 
 
 def test_no_evidence_for_a_must_have_language_caps_fit(fake_ask):
@@ -171,7 +174,7 @@ def test_no_language_evidence_without_must_have_only_lowers_coverage(fake_ask):
 def test_only_the_briefs_languages_and_regions_count(fake_ask):
     def answer(prompt):
         return ScreenBatch(results=[
-            ScreenItem(domain="tilde.ee", holder_type="seller", data_owner="company", data_match=5,
+            ScreenItem(domain="tilde.ee", holder_type="ready", data_owner="company", data_match=5,
                        languages=[" latvian", "French"], regions=["baltics "], volume_signal=4,
                        reason="Baltic speech data"),
             ScreenItem(domain="global.com", holder_type="untapped", data_owner="customers", data_match=5,
@@ -199,21 +202,22 @@ def test_coverage_unknown_when_brief_names_no_languages_or_regions(fake_ask):
     assert d.scores.coverage is None
 
 
-def test_vendor_working_on_customers_data_is_by_product(fake_ask):
+def test_ready_source_working_on_customers_data_is_untapped(fake_ask):
     def answer(prompt):
         return ScreenBatch(results=[
-            ScreenItem(domain="agency.lt", holder_type="seller", data_owner="customers", data_match=4,
-                       languages=["English"], regions=[], volume_signal=None,
+            ScreenItem(domain="agency.lt", holder_type="ready", data_owner="customers", data_match=4,
+                       languages=["English"], regions=[], volume_signal=None, exists=4, allowed=4, willing=4,
                        reason="interpreting and transcription agency"),
-            ScreenItem(domain="data.com", holder_type="seller", data_owner="company", data_match=5,
+            ScreenItem(domain="data.com", holder_type="ready", data_owner="company", data_match=5,
                        languages=["English"], regions=[], volume_signal=None, reason="sells meeting datasets"),
         ])
 
     fake_ask.responses[ScreenBatch] = answer
     agency, seller = _cand("agency.lt"), _cand("data.com")
     screen(BRIEF, [agency, seller], fetch=lambda _: "text", progress=lambda _: None)
+    # its customers own the data: "allowed" is at most 2, so the grade is low
     assert (agency.holder_type, agency.data_owner, agency.scores.licence) == ("untapped", "customers", 2)
-    assert (seller.holder_type, seller.scores.licence) == ("seller", 4)
+    assert (seller.holder_type, seller.saleability, seller.scores.licence) == ("ready", None, 4)
 
 
 def test_screen_sends_homepage_and_source_page(fake_ask):
@@ -289,7 +293,7 @@ def test_only_must_have_contradictions_cap(fake_ask):
 
 def test_must_have_filters_exclude(fake_ask):
     fake_ask.responses[ScreenBatch] = _answer()
-    vendors_only = brief_with(sources=Pick(values=[SELLERS], importance="must"))
+    vendors_only = brief_with(sources=Pick(values=[READY], importance="must"))
     c = _cand("acme.com")
     screen(vendors_only, [c], fetch=lambda _: "text", progress=lambda _: None)
     assert c.excluded and "not a source type the buyer accepts" in c.reason
@@ -299,10 +303,10 @@ def test_must_have_filters_exclude(fake_ask):
     screen(no_customer_data, [c], fetch=lambda _: "text", progress=lambda _: None)
     assert c.excluded and "customers' data" in c.reason
 
-    nice = brief_with(sources=Pick(values=[SELLERS]), customer_data=Pick(values=[CUSTOMER_EXCLUDE]))
+    nice = brief_with(sources=Pick(values=[READY]), customer_data=Pick(values=[CUSTOMER_EXCLUDE]))
     c = _cand("acme.com")
     screen(nice, [c], fetch=lambda _: "text", progress=lambda _: None)
-    assert not c.excluded and c.scores.licence == 1  # nice to have: scored down, not dropped
+    assert not c.excluded and c.scores.licence == 1  # nice to have: "allowed" is 1, not dropped
 
 
 def test_volume_set_to_any_is_ignored(fake_ask):
@@ -333,3 +337,13 @@ def test_price_and_age_kept_only_with_a_quote_on_the_page(fake_ask):
     c = _cand("acme.com")
     screen(BRIEF, [c], fetch=lambda _: home, progress=lambda _: None, source=lambda _: src)
     assert (c.data_period.value, c.data_period.url) == ("2018 to 2024", "https://listings.example/acme")
+
+
+def test_short_fact_quotes_are_kept_when_they_contain_the_numbers(fake_ask):
+    fake_ask.responses[ScreenBatch] = _answer(founded={"value": "2016", "quote": "Founded in 2016."},
+                                              price={"value": "£500", "quote": "We record calls."})
+    c = _cand("acme.com")
+    screen(BRIEF, [c], fetch=lambda _: "Founded in 2016. We record calls.", progress=lambda _: None,
+           source=lambda _: None)
+    assert c.founded and c.founded.value == "2016"  # 3 words, but the quote contains the year
+    assert c.price is None  # the quote doesn't contain the price

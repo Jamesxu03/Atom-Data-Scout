@@ -2,9 +2,9 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
-from worker.archetypes import ArchetypeKey
 from worker.brief_template import (
     CATEGORIES,
     COMMERCIAL,
@@ -38,18 +38,46 @@ class Facts(BaseModel):
 FACTS = tuple(Facts.model_fields)
 
 
-# seller: already holds this kind of data and sells or licenses it; collector: records or
-# annotates it to a client's spec as a service; untapped: holds it because of what it does (see
-# worker/archetypes.py) but doesn't sell it; public: a public body, research institute or
-# repository that publishes it; technology: makes tools or hardware for it but doesn't keep it
-# at scale
-HolderType = Literal["seller", "collector", "untapped", "public", "technology", "unrelated"]
+# ready: the data is already offered (sold or licensed, listed on a marketplace, published as
+# a dataset, or recorded to order by a collector); judged by its licence. untapped: holds the
+# data but doesn't sell it; judged by saleability (Saleability below). Unrelated companies are
+# excluded rather than typed.
+HolderType = Literal["ready", "untapped"]
 DataOwner = Literal["company", "customers", "unclear"]
-# Untapped holders only. open_to_it: pages mention data partnerships, licensing or AI training data
-SellingStatus = Literal["not_selling", "open_to_it", "unclear"]
 Channel = Literal["product_search", "snowball", "directory", "marketplace", "public_source", "distressed",
                   "signals", "suppliers", "records"]
-_OLD_HOLDER_TYPES = {"vendor": "seller", "by_product": "untapped"}
+# Earlier holder types -> (type, collector flag); None: unrelated, now excluded
+_OLD_HOLDER_TYPES = {"vendor": ("ready", False), "seller": ("ready", False), "public": ("ready", False),
+                     "collector": ("ready", True), "by_product": ("untapped", False), "technology": ("untapped", False),
+                     "unrelated": (None, False)}
+
+
+class Answer(BaseModel):
+    """One of the three saleability questions."""
+
+    # Gemini skips optional lists, so the schema it sees requires the quotes (and the reason);
+    # the defaults are for answers the screen builds, which have no quotes
+    model_config = ConfigDict(json_schema_extra={"required": ["score", "reason", "evidence"]})
+
+    score: int | None = Field(default=None, description="1 to 5; null if unknown")
+    reason: str = Field(default="", description="One line: why this score")
+    evidence: list[Evidence] = Field(default=[], description="Quotes that show it (research only)")
+    verified: SkipJsonSchema[bool] = False  # set by us: research found a quote on the cited page
+
+
+SALEABILITY_QUESTIONS = ("exists", "allowed", "willing")
+
+
+class Saleability(BaseModel):
+    """Can an untapped holder's data be bought? Three questions; the grade is the lowest score,
+    because all three must hold: the data still exists, selling it is allowed, the holder is
+    willing."""
+
+    exists: Answer = Field(description="Is the data still there and kept: archives, retention")
+    allowed: Answer = Field(description="May it be sold: ownership, terms, sensitivity")
+    willing: Answer = Field(description="Would they sell: distress, data deals, or a big or regulated brand")
+    obstacle: str | None = Field(default=None, description="The main thing in the way, in one line")
+    path: str | None = Field(default=None, description="How it could still be bought, if there is a way")
 
 
 class HolderHypothesis(BaseModel):
@@ -129,8 +157,7 @@ class Research(Facts):
     volume_score: int | None = Field(description="1 to 5 against the buyer's volume; null if unknown")
     volume_evidence: list[Evidence]
     checks: list[Check] = Field(default=[], description="One per requirement listed under Checks")
-    selling_status: SellingStatus | None = Field(default=None, description="Untapped holders only")
-    selling_evidence: list[Evidence] = Field(default=[], description="Quotes showing the selling status")
+    saleability: Saleability | None = Field(default=None, description="Untapped holders only")
 
     @model_validator(mode="before")
     @classmethod
@@ -163,9 +190,8 @@ class Candidate(Facts):
     reason: str | None = None
     holder_type: HolderType | None = None
     data_owner: DataOwner | None = None
-    collects_to_order: bool = False  # records or collects this kind of data to a client's spec
-    archetype: ArchetypeKey | None = None  # untapped holders: why they hold the data
-    selling_status: SellingStatus | None = None  # untapped holders
+    collector: bool = False  # ready source that records to order, with no existing data
+    saleability: Saleability | None = None  # untapped holders: the screen's initial answers
     languages: list[str] = Field(default=[], description="Buyer's languages it shows evidence of working in")
     regions: list[str] = Field(default=[], description="Buyer's regions it shows evidence of working in")
     scores: Scores = Scores()
@@ -180,10 +206,23 @@ class Candidate(Facts):
     @model_validator(mode="before")
     @classmethod
     def _upgrade(cls, data):
-        """Sessions saved before vendors were split into sellers and collectors."""
+        """Sessions saved with earlier holder types."""
         if isinstance(data, dict) and data.get("holder_type") in _OLD_HOLDER_TYPES:
-            data = {**data, "holder_type": _OLD_HOLDER_TYPES[data["holder_type"]]}
+            holder, collector = _OLD_HOLDER_TYPES[data["holder_type"]]
+            data = {**data, "holder_type": holder, "collector": collector or data.get("collector", False)}
+            if holder is None:
+                data["excluded"] = True
         return data
+
+    def current_saleability(self) -> Saleability | None:
+        """Research's answers where it verified them, otherwise the screen's."""
+        screen, checked = self.saleability, self.research and self.research.saleability
+        if not checked:
+            return screen
+        pick = {q: a if a.verified or not screen else getattr(screen, q)
+                for q in SALEABILITY_QUESTIONS if (a := getattr(checked, q))}
+        return checked.model_copy(update={**pick, "obstacle": checked.obstacle or (screen and screen.obstacle),
+                                          "path": checked.path or (screen and screen.path)})
 
     @property
     def screened(self) -> bool:

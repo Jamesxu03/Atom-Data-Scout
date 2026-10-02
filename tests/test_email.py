@@ -8,7 +8,7 @@ def _cand(holder_type="untapped", **kw):
     return Candidate(
         name="Acme", website="https://acme.com", domain="acme.com", channels=["product_search"], source_urls=[],
         reason="AI notetaker for sales teams", holder_type=holder_type,
-        **{"data_owner": "customers", "archetype": "service" if holder_type == "untapped" else None, **kw},
+        **{"data_owner": "customers", **kw},
         research=Research(
             data_held="recorded sales meetings with transcripts", licence=UNCLEAR,
             licence_evidence=[Evidence(quote="Customers own their recordings", url="https://acme.com/terms")],
@@ -39,20 +39,12 @@ def test_prompt_built_from_brief_and_evidence():
     assert "British English" in p and "Never state or suggest a price" in p
 
 
-def test_untapped_holders_get_the_pitch_for_why_they_hold_it():
-    ask = build_prompt(BRIEF, _cand(), JANE).split("Ask:")[1].split("\n\nRules")[0]
-    assert "recordings your service already captures" in ask and "customers' consent" in ask
-    kept = build_prompt(BRIEF, _cand(archetype="kept_by_law"), JANE)
-    assert "You already pay to store recordings you must keep" in kept
-    keen = build_prompt(BRIEF, _cand(selling_status="open_to_it"), JANE)
-    assert "on what terms they would license data they hold" in keen
-
-
 def test_ask_depends_on_holder_type():
-    assert "price" in build_prompt(BRIEF, _cand("seller"), JANE).split("Ask:")[1].split("\n")[0]
-    assert "licence terms" in build_prompt(BRIEF, _cand("public"), None)
-    assert "who would own the result" in build_prompt(BRIEF, _cand("collector"), JANE)
-    assert "the team at Acme" in build_prompt(BRIEF, _cand("public"), None)
+    # the per-type asks are covered in test_saleability; here: untapped holders with customer data
+    ask = build_prompt(BRIEF, _cand(), JANE).split("Ask:")[1].split("\n\nRules")[0]
+    assert "consider licensing data they already hold" in ask and "customers' consent" in ask
+    assert "who would own the result" in build_prompt(BRIEF, _cand("ready", collector=True), JANE)
+    assert "the team at Acme" in build_prompt(BRIEF, _cand("ready"), None)
 
 
 def test_draft_is_addressed_to_the_contact(fake_ask):

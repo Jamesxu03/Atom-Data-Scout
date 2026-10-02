@@ -84,6 +84,14 @@ def test_client_errors_are_not_retried(monkeypatch, status):
     assert len(calls) == 1
 
 
+def test_recitation_block_is_retried(monkeypatch):
+    # a 400 for output resembling copyrighted text (long quotes): sampled, so a retry can pass
+    calls = _use(monkeypatch, StatusError(400, "Request blocked due to copyright/recitation content."),
+                 '{"value": "ok"}')
+    assert llm.ask("q", Answer).value == "ok"
+    assert len(calls) == 2
+
+
 def test_server_error_is_retried(monkeypatch):
     calls = _use(monkeypatch, StatusError(503, "unavailable"), '{"value": "ok"}')
     assert llm.ask("q", Answer).value == "ok"

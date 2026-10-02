@@ -45,6 +45,11 @@ def http_status(e: Exception) -> int | None:
     return None
 
 
+def _is_recitation(e: Exception) -> bool:
+    """Output blocked for resembling copyrighted text: sampled, so another attempt often passes."""
+    return "recitation" in str(e).lower()
+
+
 def _is_hard_quota(e: Exception) -> bool:
     """Daily cap or zero quota (free tier): waiting a few seconds won't help."""
     msg = str(e).lower()
@@ -61,7 +66,8 @@ def ask(
 ) -> T:
     """Send prompt to Gemini and return its answer parsed into `schema`.
 
-    Retries bad JSON, timeouts, connection errors, 5xx and per-minute 429s. Raises at once on
+    Retries bad JSON, timeouts, connection errors, 5xx, per-minute 429s and output blocked for
+    recitation (long word-for-word quotes). Raises at once on
     other 4xx (bad request, auth, not found) and raises QuotaExceeded on quota exhaustion.
     """
     body = {
@@ -92,7 +98,7 @@ def ask(
             status = http_status(e)
             if status == 429 and _is_hard_quota(e):
                 raise QuotaExceeded(f"Gemini quota exhausted for {model}: {str(e)[:300]}") from e
-            if status is not None and status not in RETRYABLE_STATUS:
+            if status is not None and status not in RETRYABLE_STATUS and not _is_recitation(e):
                 raise  # 400/401/403/404: the same request will fail the same way
             last_error = e
             delay = 5 * (attempt + 1) if status == 429 else 2**attempt

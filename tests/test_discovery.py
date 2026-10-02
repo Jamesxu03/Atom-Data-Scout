@@ -1,7 +1,7 @@
 import httpx
 
 from tests.test_hypotheses import BRIEF, brief_with
-from worker.brief_template import DISTRESSED, SELLERS, UNTAPPED, Pick
+from worker.brief_template import READY, UNTAPPED, Pick
 from worker.config import DISCOVERY
 from worker.discovery import Discovery, Hit, channels, discover, merge, pick_seeds, snowball
 from worker.discovery.domains import normalize_domain
@@ -132,28 +132,31 @@ def test_discover_only_runs_channels_for_the_source_types_picked(fake_ask):
     fake_ask.responses[FoundList] = _router
     discover(brief_with(sources=Pick(values=[UNTAPPED])), HYPS, **QUIET)
     assert not any("already produce or sell data" in c.prompt for c in fake_ask.calls)
-    assert not any("not only companies" in c.prompt or "insolvency notices" in c.prompt for c in fake_ask.calls)
-    assert len(fake_ask.calls) == DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"] + 3
+    assert not any("not only companies" in c.prompt for c in fake_ask.calls)
+    untapped_calls = sum(DISCOVERY[f"{k}_calls"] for k in ("distressed", "signals", "suppliers", "records"))
+    assert len(fake_ask.calls) == (DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"]
+                                   + untapped_calls)
     (signals,) = [c.prompt for c in fake_ask.calls if "signs on their own pages" in c.prompt]
     assert "Kept by law" in signals and "we retain recordings for" in signals  # the archetype checklist
     (suppliers,) = [c.prompt for c in fake_ask.calls if "logo walls" in c.prompt]
     assert "call-recording and contact-centre platforms" in suppliers  # tools for the audio modality
 
     fake_ask.calls.clear()
-    d = discover(brief_with(sources=Pick(values=[SELLERS, DISTRESSED]), exclusions=Pick(values=["dataco.io"])),
-                 HYPS, **QUIET)
+    d = discover(brief_with(sources=Pick(values=[READY]), exclusions=Pick(values=["dataco.io"])), HYPS, **QUIET)
     prompts = [c.prompt for c in fake_ask.calls]
     assert not any("- query " in p for p in prompts)  # no product search or directories
-    assert sum("already produce or sell data" in p for p in prompts) == 1  # published datasets
-    assert not any("signs on their own pages" in p for p in prompts)  # no untapped-holder channels
-    assert sum("insolvency notices" in p for p in prompts) == 1
+    assert sum("already produce or sell data" in p for p in prompts) == min(
+        DISCOVERY["marketplace_calls"], len(channels.MARKETPLACE_ANGLES))
+    assert sum("not only companies" in p for p in prompts) == min(
+        DISCOVERY["public_source_calls"], len(channels.PUBLIC_ANGLES))
+    assert not any("signs on their own pages" in p or "insolvency notices" in p for p in prompts)
     assert "dataco.io" not in {c.domain for c in d.candidates} and d.exclusions == ["dataco.io"]
 
 
-def test_pick_seeds_uses_explicit_then_well_scored_by_product_holders():
-    def cand(domain, fit, channels, holder="untapped", coverage=5):
+def test_pick_seeds_uses_explicit_then_well_scored_untapped_holders():
+    def cand(domain, fit, channels, holder="untapped", coverage=5, collector=False):
         return Candidate(name=domain, website=f"https://{domain}", domain=domain, channels=channels,
-                         source_urls=[], reason="r", fit=fit, holder_type=holder,
+                         source_urls=[], reason="r", fit=fit, holder_type=holder, collector=collector,
                          scores=Scores(data_match=5, coverage=coverage))
 
     cands = [
@@ -165,9 +168,9 @@ def test_pick_seeds_uses_explicit_then_well_scored_by_product_holders():
         cand("fireflies.ai", 4.5, ["directory"]),
         # high fit, but no evidence of the buyer's languages: its alternatives would be too
         cand("global.com", 4.6, ["product_search", "directory"], coverage=1),
-        # well corroborated, but alternatives to a tracking-hardware maker drift off topic
-        cand("tracker.com", 3.0, ["product_search", "directory", "snowball"], holder="technology"),
-        cand("vendor.com", 4.9, ["product_search", "directory", "marketplace"], holder="seller"),
+        # ready sources don't seed: their alternatives are other vendors, found by the vendor channels
+        cand("vendor.com", 4.9, ["product_search", "directory", "marketplace"], holder="ready"),
+        cand("collector.com", 4.9, ["marketplace"], holder="ready", collector=True),
     ]
     seeds = pick_seeds(cands, explicit=[("Fireflies", "https://fireflies.ai")])
     assert [w for _, w in seeds] == ["https://fireflies.ai", "https://best.com", "https://two.com",

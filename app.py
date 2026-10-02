@@ -21,8 +21,6 @@ import pandas as pd
 import streamlit as st
 
 from worker import pipeline, sessions
-from worker.archetypes import ARCHETYPES
-from worker.archetypes import BY_KEY as ARCHETYPE_BY_KEY
 from worker.brief_template import (
     CATEGORIES,
     CODE_LABELS,
@@ -37,7 +35,7 @@ from worker.brief_template import (
 )
 from worker.config import RELEVANT_FIT
 from worker.schemas import Candidate, Contact
-from worker.scoring import must_failures, prior_label
+from worker.scoring import answers, is_verified, must_failures, saleability_label
 from worker.steps import brief as brief_step
 from worker.steps import email as email_step
 
@@ -47,9 +45,8 @@ EXAMPLE_BRIEF = (
 )
 LOGO = "assets/atom_logo.png"
 ICON = "assets/atom_icon.png"  # square: a wide logo gets squeezed into the browser tab's favicon
-HOLDER_LABELS = {"seller": "Seller", "collector": "Collector", "untapped": "Untapped holder", "public": "Public",
-                 "technology": "Technology", "unrelated": "Unrelated", None: "Unknown"}
-SELLING_LABELS = {"open_to_it": "open to selling", "not_selling": "not selling", "unclear": "selling unclear"}
+HOLDER_LABELS = {"ready": "Ready source", "untapped": "Untapped", None: "Unknown"}
+QUESTION_LABELS = {"exists": "Exists?", "allowed": "Allowed?", "willing": "Willing?"}
 VERDICT_ICONS = {"meets": "✅", "fails": "❌", "unclear": "❔"}
 LEGAL_NOTE = "Licence status is a screening flag from public pages, not legal advice."
 FACT_LABELS = {"price": "Price", "data_period": "Data years", "founded": "Founded"}
@@ -286,23 +283,18 @@ def fact_text(c: Candidate, key: str) -> str:
     return f.value
 
 
-def licence_label(c: Candidate) -> str:
-    if c.research:
-        return f"checked: {c.research.licence}"
-    if c.holder_type in (None, "unrelated"):
-        return "?"
-    return f"prior: {prior_label(c)}"
-
-
 def type_label(c: Candidate) -> str:
-    """e.g. "Seller + collects", "Untapped holder · Kept by law · open to selling"."""
-    label = HOLDER_LABELS[c.holder_type]
-    if c.holder_type == "seller" and c.collects_to_order:
-        label += " + collects"
-    if c.holder_type == "untapped":
-        label += "".join(f" · {x}" for x in (c.archetype and ARCHETYPE_BY_KEY[c.archetype].label,
-                                             c.selling_status == "open_to_it" and SELLING_LABELS["open_to_it"]) if x)
-    return label
+    if c.excluded and c.holder_type is None:
+        return "Excluded"
+    return HOLDER_LABELS[c.holder_type] + (" · records to order" if c.collector else "")
+
+
+def obstacle_text(c: Candidate) -> str:
+    """The main obstacle, and how to buy it anyway, for untapped holders."""
+    s = c.current_saleability()
+    if not s or not (s.obstacle or s.path):
+        return ""
+    return " → ".join(x for x in (s.obstacle, s.path) if x)
 
 
 def progress_panel(path: str) -> None:
@@ -388,11 +380,6 @@ def candidates_table(s: sessions.Session, path: str) -> None:
         help="Only companies with evidence for at least one of these") if s.brief.languages else []
     hide_unknown = right.toggle("Known volume", key=f"unknown-volume-{key}",
                                 help="Only companies whose volume is known. Most stay unknown until researched.")
-    kinds_present = [a for a in ARCHETYPES if any(c.archetype == a.key for c in s.discovery.candidates)]
-    kinds = mid.multiselect(
-        "Why untapped holders have it", [a.key for a in kinds_present], key=f"archetypes-{key}", placeholder="Any",
-        format_func=lambda k: ARCHETYPE_BY_KEY[k].label,
-        help="Narrows untapped holders to these reasons; other types are unaffected") if kinds_present else []
 
     def shown(c: Candidate) -> bool:
         if c.excluded:
@@ -401,7 +388,6 @@ def candidates_table(s: sessions.Session, path: str) -> None:
         return (c.holder_type in types
                 and (c.fit is None or c.fit >= min_fit)
                 and (not languages or any(lang in c.languages for lang in languages))
-                and (not kinds or c.holder_type != "untapped" or c.archetype in kinds)
                 and (volume >= min_volume if volume is not None else not hide_unknown))
 
     rows = [c for c in s.discovery.candidates if shown(c)]
@@ -414,13 +400,14 @@ def candidates_table(s: sessions.Session, path: str) -> None:
                 "Fit": fmt(c.fit),
                 "Company": c.name,
                 "Type": type_label(c),
-                "Licence": licence_label(c),
+                "Saleability": saleability_label(c, s.brief),
                 "Data match": fmt(c.scores.data_match),
                 "Coverage": fmt(c.scores.coverage),
                 "Volume": fmt(c.scores.volume),
                 **{label: fact_text(c, k) for k, label in FACT_LABELS.items()},
                 "Languages and regions": ", ".join(c.languages + c.regions),
                 "Reason": c.reason,
+                "Obstacle → how to buy": obstacle_text(c),
                 "Must-haves not met": ", ".join(CATEGORIES[k].label for k in must_failures(c, s.brief)),
                 "Website": c.website,
                 "Found on": c.source_urls[0] if c.source_urls else None,
@@ -435,8 +422,12 @@ def candidates_table(s: sessions.Session, path: str) -> None:
         key=f"table-{key}",
         column_config={
             "Fit": st.column_config.TextColumn(help="1 to 5: weighted mean of the known scores, after caps"),
-            "Licence": st.column_config.TextColumn(
-                help="prior: a guess from the holder type until research checks it. " + LEGAL_NOTE),
+            "Saleability": st.column_config.TextColumn(
+                help="Ready sources: the licence (prior until research checks it). Untapped: the lowest of three "
+                     "answers (exists, allowed, willing): High, Medium, Low or Not sellable; initial from the "
+                     "homepage, verified once research finds quotes. " + LEGAL_NOTE),
+            "Obstacle → how to buy": st.column_config.TextColumn(
+                help="Untapped holders: what stands in the way, and how it could still be bought"),
             "Coverage": st.column_config.TextColumn(help="Evidence for the brief's languages and regions"),
             "Price": st.column_config.TextColumn(help=f"Published price of the data. {FACT_HELP}"),
             "Data years": st.column_config.TextColumn(help=f"When the data was recorded. {FACT_HELP}"),
@@ -473,14 +464,17 @@ def researched(s: sessions.Session, path: str, locked: bool) -> None:
     st.subheader("Researched")
     for c in done:
         r = c.research
-        with st.expander(f"{c.name} — fit {fmt(c.fit)} — licence {r.licence}"):
-            accepted = s.brief.active("licence")
-            fits = f" (you accept: {', '.join(accepted)})" if accepted else ""
-            st.markdown(f"**Licence:** {r.licence}{fits}")
-            for ev in r.licence_evidence:
-                st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
-            if not r.licence_evidence:
-                st.caption("No verified quote.")
+        with st.expander(f"{c.name} — fit {fmt(c.fit)} — {saleability_label(c, s.brief)}"):
+            if c.holder_type == "untapped":
+                saleability_section(c, s.brief)
+            else:
+                accepted = s.brief.active("licence")
+                fits = f" (you accept: {', '.join(accepted)})" if accepted else ""
+                st.markdown(f"**Licence:** {r.licence}{fits}")
+                for ev in r.licence_evidence:
+                    st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
+                if not r.licence_evidence:
+                    st.caption("No verified quote.")
             st.markdown(f"**Volume:** {r.volume_estimate or 'unknown'}")
             for ev in r.volume_evidence:
                 st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
@@ -488,10 +482,6 @@ def researched(s: sessions.Session, path: str, locked: bool) -> None:
                 if f := c.fact(k):
                     st.markdown(f"**{label}:** {fact_text(c, k)}\n\n> {f.quote}\n\n[{f.url}]({f.url})")
             st.markdown(f"**Data held:** {r.data_held}")
-            if c.holder_type == "untapped":
-                st.markdown(f"**Selling:** {SELLING_LABELS.get(c.selling_status, 'unclear')}")
-                for ev in r.selling_evidence:
-                    st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
             if r.checks:
                 st.markdown("**Checks against the brief**")
             for ch in r.checks:
@@ -505,6 +495,26 @@ def researched(s: sessions.Session, path: str, locked: bool) -> None:
     with_contacts = [c for c in done if c.contacts]
     if with_contacts:
         st.download_button("Download contacts CSV", pipeline.contacts_csv(with_contacts), "contacts.csv", "text/csv")
+
+
+def saleability_section(c: Candidate, brief: Brief) -> None:
+    """The three answers with their reasons and quotes; the grade is the lowest of them."""
+    st.markdown(f"**Saleability:** {saleability_label(c, brief)} — the lowest of the three answers")
+    s, scores = c.current_saleability(), answers(c, brief)
+    for q, label in QUESTION_LABELS.items():
+        a = getattr(s, q) if s else None
+        score = scores[q]
+        state = "verified" if a and a.verified else "initial" if score is not None else "unknown"
+        reason = f": {a.reason}" if a and a.reason else ""
+        st.markdown(f"- **{label}** {score if score is not None else '?'}/5 ({state}){reason}")
+        for ev in a.evidence if a else []:
+            st.markdown(f"  > {ev.quote}\n\n  [{ev.url}]({ev.url})")
+    if s and s.obstacle:
+        st.markdown(f"**Main obstacle:** {s.obstacle}")
+    if s and s.path:
+        st.markdown(f"**How to buy it:** {s.path}")
+    if not is_verified(c):
+        st.caption("Answers without a quote research could find on the cited page stay initial.")
 
 
 def contacts_section(c: Candidate, path: str) -> None:

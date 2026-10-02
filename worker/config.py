@@ -28,8 +28,8 @@ DISCOVERY = {
 }
 
 # Snowball only from untapped holders (plus collectors when the buyer wants data recorded to
-# order) with fit >= SEED_FIT and evidence for the brief's languages or regions. Technology
-# providers drift into "alternatives to <hardware>" pages full of unrelated device makers.
+# order) with fit >= SEED_FIT and evidence for the brief's languages or regions. Tool and
+# hardware makers rarely pass: their saleability grade (the data must exist) caps their fit.
 SNOWBALL_SEED_TYPES = ["untapped"]
 
 # Relevance screen: companies per Flash call
@@ -49,5 +49,6 @@ RELEVANT_FIT = 2.5  # shown by default and counted as relevant
 SEED_FIT = 3.5  # snowball seeds
 # Caps. The must-have cap sits below RELEVANT_FIT so such companies drop out of the default view.
 MUST_HAVE_CAP = 2.0  # a must-have language or region with no evidence
-TECHNOLOGY_CAP = 3.0
-INTERNAL_ONLY_CAP = 2.0  # research found the data is for internal use only
+INTERNAL_ONLY_CAP = 2.0  # research found a ready source's data is for internal use only
+NOT_SELLABLE_CAP = 2.0  # untapped holder graded not sellable (one of the three questions scored 1)
+LOW_SALEABILITY_CAP = 3.0  # untapped holder graded low (lowest answer 2)

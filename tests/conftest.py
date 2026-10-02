@@ -15,6 +15,11 @@ def no_network(monkeypatch):
     monkeypatch.setattr(httpx, "head", blocked)
     monkeypatch.setattr("worker.crawl._recent_failures", {})
 
+    def no_browser(self, url):
+        raise RuntimeError(f"browser disabled in tests: {url}")
+
+    monkeypatch.setattr("worker.crawl.Browser.render", no_browser)
+
 
 @pytest.fixture(autouse=True)
 def tmp_sessions(monkeypatch, tmp_path):
