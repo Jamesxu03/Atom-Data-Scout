@@ -14,6 +14,7 @@ claims. The result is a screening flag from public pages, not legal advice.
 from collections.abc import Callable
 
 from worker import llm
+from worker.archetypes import BY_KEY as ARCHETYPES
 from worker.brief_template import (
     CATEGORIES,
     COMMERCIAL,
@@ -30,7 +31,13 @@ from worker.config import MODEL, RESEARCH_TEXT_CHARS
 from worker.crawl import CrawlResult, fetch_html_quick
 from worker.discovery.channels import resolve_source
 from worker.schemas import FACTS, Candidate, Check, CheckedCategory, Evidence, Research
-from worker.verify import quote_in_text, quote_on_page, value_in_quote
+from worker.verify import (
+    MIN_FACT_QUOTE_WORDS,
+    MIN_QUOTE_WORDS,
+    quote_in_text,
+    quote_on_page,
+    value_in_quote,
+)
 
 LICENCE_MEANINGS = {
     OPEN: "published as public domain or under an open licence with no conditions (CC0, open government data)",
@@ -54,6 +61,8 @@ Volume: {volume}
 
 Company: {name} ({website})
 What the first screen found: {reason}
+Kind of holder: {holder}
+{type_questions}
 
 Find out:
 1. data_held: what data the company holds that matches the buyer's needs: kind, formats,
@@ -72,11 +81,14 @@ Find out:
      hour", a marketplace listing price), or "On request" if the company says so.
    - founded: the year the company was founded.
    - data_period: when the matching data was recorded or collected, e.g. "2018 to 2024".
+6. selling_status (untapped holders only, otherwise null): "open_to_it" if the company
+   licenses data, runs data partnerships or AI training data programmes, or says it would;
+   "not_selling" if it clearly doesn't; "unclear" otherwise. selling_evidence: quotes for it.
 
 Evidence rules (quotes that break them are thrown away):
 - Every licence other than "{unclear}", every volume_estimate, and every "meets" or "fails"
   verdict needs quotes. Every price, founded and data_period needs a quote containing its
-  numbers.
+  numbers. A selling_status other than "unclear" needs selling_evidence.
 - quote: copied word for word from the page, at least one full sentence. No paraphrase, no
   joining of separate passages.
 - url: the page the quote is on: one of the excerpt URLs below, or a page you found in search.
@@ -103,10 +115,44 @@ def _pages(crawl: CrawlResult) -> str:
     return "\n\n".join(parts) or "(No pages could be crawled; rely on Google Search.)"
 
 
+# What to look for depends on the kind of holder
+TYPE_QUESTIONS = {
+    "seller": """Focus on its catalogue entry for matching data, how much it has in stock, whether
+a sample is available, and the price.""",
+    "collector": """It records data to order, so judge what it could collect, not what it holds:
+its capacity (contributors, languages, turnaround) and per-unit price as volume and price, how
+it gets contributors' consent, and who owns data it collects for a client. For licence: rights
+assigned to the client is "Commercial, exclusive"; the company keeping rights and licensing
+them is "Commercial, non-exclusive".""",
+    "untapped": """It holds the data without selling it. Focus on how long it keeps the data,
+whether its privacy policy or terms allow sharing it or using it for AI training, and whether
+its customers own it.""",
+}
+REUSE_QUESTION = """The data was recorded for another purpose ({why}). Check whether that purpose
+allows reuse for AI training: a policy that keeps recordings only for that purpose (e.g. quality
+monitoring, regulatory record-keeping) is "Internal use only"; one that allows sharing or
+training is evidence for licensing."""
+
+
+def _type_questions(c: Candidate) -> str:
+    lines = [TYPE_QUESTIONS.get(c.holder_type, "")]
+    if c.holder_type == "untapped" and c.archetype and (a := ARCHETYPES[c.archetype]).reuse_risk:
+        lines.append(REUSE_QUESTION.format(why=a.why))
+    return "\n".join(line for line in lines if line)
+
+
+def _holder(c: Candidate) -> str:
+    if c.holder_type == "untapped" and c.archetype:
+        return f"untapped holder ({ARCHETYPES[c.archetype].label})"
+    return (c.holder_type or "unknown") + (" that also collects to order" if c.collects_to_order
+                                           and c.holder_type == "seller" else "")
+
+
 def build_prompt(brief: Brief, c: Candidate, crawl: CrawlResult) -> str:
     return PROMPT.format(
         brief=brief.summary("FRV"), volume=brief.volume_wanted(), name=c.name, website=c.website,
-        reason=c.reason or "nothing", licences="\n".join(f'   - "{k}": {v}' for k, v in LICENCE_MEANINGS.items()),
+        reason=c.reason or "nothing", holder=_holder(c), type_questions=_type_questions(c),
+        licences="\n".join(f'   - "{k}": {v}' for k, v in LICENCE_MEANINGS.items()),
         checks=_checks(brief), unclear=UNCLEAR, pages=_pages(crawl),
     )
 
@@ -116,18 +162,19 @@ def _same_url(a: str, b: str) -> bool:
 
 
 def verify_evidence(
-    evidence: list[Evidence], crawl: CrawlResult, fetch: Callable[[str], str] = fetch_html_quick
+    evidence: list[Evidence], crawl: CrawlResult, fetch: Callable[[str], str] = fetch_html_quick,
+    min_words: int = MIN_QUOTE_WORDS,
 ) -> list[Evidence]:
     """Only quotes found on the page they cite, with search redirect links resolved."""
     out = []
     for ev in evidence:
         url = resolve_source(ev.url)
         crawled = next((p for p in crawl.pages() if _same_url(p.url, url)), None)
-        if crawled and quote_in_text(ev.quote, crawled.text):
+        if crawled and quote_in_text(ev.quote, crawled.text, min_words):
             ok = True
         else:  # not crawled, or the crawl's main-text extraction dropped the passage
             try:
-                ok = quote_on_page(ev.quote, fetch(url))
+                ok = quote_on_page(ev.quote, fetch(url), min_words)
             except Exception:  # unreachable = can't verify
                 ok = False
         if ok:
@@ -151,8 +198,12 @@ def verify_research(r: Research, crawl: CrawlResult, fetch: Callable[[str], str]
     update["checks"] = list({ch.category: ch for ch in checks}.values())  # one per category
     for key in FACTS:
         f = getattr(r, key)
-        kept = verify_evidence([f], crawl, fetch) if f and value_in_quote(f.value, f.quote) else []
+        kept = verify_evidence([f], crawl, fetch, MIN_FACT_QUOTE_WORDS) if f and value_in_quote(f.value, f.quote) else []
         update[key] = kept[0] if kept else None
+    selling_evidence = verify_evidence(r.selling_evidence, crawl, fetch)
+    update["selling_evidence"] = selling_evidence
+    if r.selling_status and r.selling_status != "unclear" and not selling_evidence:
+        update["selling_status"] = "unclear"
     return r.model_copy(update=update)
 
 

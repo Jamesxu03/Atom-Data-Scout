@@ -16,7 +16,7 @@ QUIET = {"progress": lambda _: None}
 def _otter_good_rest_unrelated(prompt: str) -> ScreenBatch:
     domains = [line[4:].split(" ")[0] for line in prompt.splitlines() if line.startswith("### ")]
     return ScreenBatch(results=[
-        ScreenItem(domain=d, holder_type="by_product" if d == "otter.ai" else "unrelated",
+        ScreenItem(domain=d, holder_type="untapped" if d == "otter.ai" else "unrelated",
                    data_owner="company", data_match=5 if d == "otter.ai" else 1, languages=["English"],
                    regions=[], volume_signal=4, reason="r")
         for d in domains

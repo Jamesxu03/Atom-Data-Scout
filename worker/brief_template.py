@@ -14,7 +14,7 @@ Every category also has an importance: must (hard cap when evidence contradicts 
 from dataclasses import dataclass
 from typing import Literal
 
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, create_model, model_validator
 
 PickType = Literal["single", "multi", "amount", "years", "text"]
 Importance = Literal["must", "nice", "any"]
@@ -46,16 +46,24 @@ class Section:
 # Choices other code refers to by name
 AUDIO, VIDEO, IMAGE, TEXT = "Audio/speech", "Video", "Image", "Text"
 TABULAR, SENSOR, GEO = "Tabular records", "Time series/sensor", "Geospatial"
-VENDORS = "Data vendors and collection companies"
+SELLERS = "Data sellers (existing datasets)"
+COLLECTORS = "Data collectors (record to order)"
 MARKETPLACES = "Marketplace listings"
 PUBLIC_BODIES = "Open repositories and public bodies"
 RESEARCH_INSTITUTES = "Research institutes and universities"
-BY_PRODUCT = "By-product holders (their service generates the data)"
-DISTRESSED = "Distressed or insolvent companies"
+UNTAPPED = "Untapped holders (own data, not selling it)"
+DISTRESSED = "Distressed, closed or for-sale companies"
 TECHNOLOGY = "Technology providers with internal data"
 OPEN, OPEN_CONDITIONS, RESTRICTED = "Public domain / Open", "Open with conditions", "Restricted / Conditional"
 COMMERCIAL, EXCLUSIVE, UNCLEAR = "Commercial, non-exclusive", "Commercial, exclusive", "Unclear"
 INTERNAL_ONLY = "Internal use only"  # found by research only; never acceptable
+CUSTOM_COLLECTION = "Custom collection to order"
+# E1 labels from before sellers, collectors and untapped holders were split
+_OLD_SOURCE_LABELS = {
+    "Data vendors and collection companies": [SELLERS, COLLECTORS],
+    "By-product holders (their service generates the data)": [UNTAPPED],
+    "Distressed or insolvent companies": [DISTRESSED],
+}
 CUSTOMER_EXCLUDE, CUSTOMER_CONSENT, CUSTOMER_LATER = (
     "Exclude", "Accept if customer consent can be obtained", "Accept, check later")
 
@@ -98,8 +106,9 @@ SECTIONS: tuple[Section, ...] = (
                  help="A seller holding 10% of the target is still useful if you combine several sellers"),
         Category("recency", "C3", "Recency", "single", "FV",
                  ("Any", "Last 5 years", "Last 2 years", "Last 12 months", "Live/ongoing"), neutral=("Any",)),
-        Category("delivery", "C4", "Delivery type", "multi", "SE",
-                 ("One-off dataset", "Recurring feed", "API access", "Custom collection to order")),
+        Category("delivery", "C4", "Delivery type", "multi", "SFE",
+                 ("One-off dataset", "Recurring feed", "API access", CUSTOM_COLLECTION),
+                 help="Must have without custom collection rules out data collectors"),
     )),
     Section("D", "Rights and compliance", (
         Category("licence", "D1", "Acceptable licence", "multi", "FRV",
@@ -132,7 +141,8 @@ SECTIONS: tuple[Section, ...] = (
     )),
     Section("E", "Where to look", (
         Category("sources", "E1", "Source types", "multi", "SF",
-                 (VENDORS, MARKETPLACES, PUBLIC_BODIES, RESEARCH_INSTITUTES, BY_PRODUCT, DISTRESSED, TECHNOLOGY),
+                 (SELLERS, COLLECTORS, MARKETPLACES, PUBLIC_BODIES, RESEARCH_INSTITUTES, UNTAPPED, DISTRESSED,
+                  TECHNOLOGY),
                  help="Empty searches everywhere. Must have also drops companies of other types."),
         Category("exclusions", "E2", "Exclusions", "text", "F", free_text=True,
                  help="Companies or domains to skip (already contacted, the buyer's competitors)"),
@@ -194,8 +204,9 @@ SECTION_OF: dict[str, Section] = {c.key: s for s in SECTIONS for c in s.categori
 
 # E1 choice -> the holder types (from the screen) it covers
 SOURCE_HOLDERS = {
-    VENDORS: {"vendor"}, MARKETPLACES: {"vendor"}, PUBLIC_BODIES: {"public"}, RESEARCH_INSTITUTES: {"public"},
-    BY_PRODUCT: {"by_product"}, DISTRESSED: {"by_product", "vendor"}, TECHNOLOGY: {"technology"},
+    SELLERS: {"seller"}, COLLECTORS: {"collector"}, MARKETPLACES: {"seller"}, PUBLIC_BODIES: {"public"},
+    RESEARCH_INSTITUTES: {"public"}, UNTAPPED: {"untapped"}, DISTRESSED: {"untapped", "seller"},
+    TECHNOLOGY: {"technology"},
 }
 
 # B1 region -> languages suggested for B2
@@ -248,6 +259,13 @@ class Brief(BaseModel):
     description: str = Field(description="What data, in a few words, e.g. multi-speaker meeting audio")
     picks: dict[str, Pick] = {}
     notes: str = ""
+
+    @model_validator(mode="after")
+    def _upgrade_sources(self):
+        """Briefs saved with the old E1 labels get the new ones."""
+        if (p := self.picks.get("sources")) and any(v in _OLD_SOURCE_LABELS for v in p.values):
+            p.values = list(dict.fromkeys(n for v in p.values for n in _OLD_SOURCE_LABELS.get(v, [v])))
+        return self
 
     def pick(self, key: str) -> Pick:
         return self.picks.get(key) or Pick()
@@ -452,8 +470,8 @@ def from_fill(parts: list[BaseModel]) -> BriefDraft:
 
 _LEGACY_LICENCE = {"training_only": [COMMERCIAL, OPEN_CONDITIONS, OPEN], "commercial": [COMMERCIAL, OPEN],
                    "exclusive": [EXCLUSIVE]}
-_LEGACY_SOURCES = {"vendor": [VENDORS, MARKETPLACES], "public": [PUBLIC_BODIES, RESEARCH_INSTITUTES],
-                   "by_product": [BY_PRODUCT], "technology": [TECHNOLOGY]}
+_LEGACY_SOURCES = {"vendor": [SELLERS, COLLECTORS, MARKETPLACES], "public": [PUBLIC_BODIES, RESEARCH_INSTITUTES],
+                   "by_product": [UNTAPPED], "technology": [TECHNOLOGY]}
 
 
 def from_legacy(old: dict) -> Brief:

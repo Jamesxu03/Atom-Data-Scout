@@ -85,8 +85,8 @@ def test_coverage():
 
 
 @pytest.mark.parametrize(("holder", "owner", "score"), [
-    ("vendor", "company", 4), ("public", "unclear", 3), ("by_product", "company", 3),
-    ("by_product", "customers", 2), ("technology", "company", 2), ("by_product", "unclear", None),
+    ("seller", "company", 4), ("public", "unclear", 3), ("untapped", "company", 3),
+    ("untapped", "customers", 2), ("technology", "company", 2), ("untapped", "unclear", None),
     ("unrelated", "company", None), (None, None, None),
 ])
 def test_licence_prior(holder, owner, score):
@@ -94,7 +94,7 @@ def test_licence_prior(holder, owner, score):
 
 
 def test_customer_data_choice_sets_the_prior():
-    held_for_customers = _cand(holder_type="by_product", data_owner="customers")
+    held_for_customers = _cand(holder_type="untapped", data_owner="customers")
     assert licence_prior(held_for_customers, brief_with(customer_data=Pick(values=[CUSTOMER_CONSENT]))) == 2
     assert licence_prior(held_for_customers, brief_with(customer_data=Pick(values=[CUSTOMER_LATER]))) is None
 
@@ -108,7 +108,7 @@ def test_licence_found_against_what_the_buyer_accepts(found, score):
 
 
 def test_research_replaces_priors_unless_it_found_nothing():
-    c = _cand(holder_type="by_product", data_owner="customers", languages=["English"],
+    c = _cand(holder_type="untapped", data_owner="customers", languages=["English"],
               scores=Scores(data_match=5, volume=3))
     rescore(c, BRIEF)
     assert (c.scores.licence, c.scores.volume) == (2, 3)

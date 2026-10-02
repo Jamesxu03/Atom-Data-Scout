@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from tests.test_hypotheses import BRIEF, brief_with
-from worker.brief_template import CUSTOMER_EXCLUDE, VENDORS, Pick
+from worker.brief_template import CUSTOMER_EXCLUDE, SELLERS, Pick
 from worker.config import MUST_HAVE_CAP, SCREEN_BATCH_SIZE, TECHNOLOGY_CAP
 from worker.schemas import Candidate
 from worker.scoring import is_relevant, rank
@@ -25,7 +25,7 @@ def _score_by_prefix(prompt):
             if domain.startswith("silent"):
                 continue
             match = {"good": 5, "mid": 3}.get(domain.split("-")[0], 1)
-            holder = "technology" if "tech" in domain else "unrelated" if match == 1 else "by_product"
+            holder = "technology" if "tech" in domain else "unrelated" if match == 1 else "untapped"
             items.append(ScreenItem(domain=domain.upper(), holder_type=holder, data_owner="company",
                                     data_match=match, languages=[] if "nolang" in domain else ["english"],
                                     regions=[], volume_signal=None, reason=f"because {domain}"))
@@ -46,7 +46,7 @@ def test_screen_scores_and_excludes(fake_ask):
 
     good = by["good-a.com"]
     assert good.reason == "because good-a.com"
-    assert (good.holder_type, good.data_owner) == ("by_product", "company")
+    assert (good.holder_type, good.data_owner) == ("untapped", "company")
     assert good.languages == ["English"]  # the buyer's spelling, not the model's
     # data_match 5, coverage 5, licence prior 3 (by-product owning its data), volume unknown
     assert (good.scores.data_match, good.scores.coverage, good.scores.licence, good.scores.volume) == (5, 5, 3, None)
@@ -171,10 +171,10 @@ def test_no_language_evidence_without_must_have_only_lowers_coverage(fake_ask):
 def test_only_the_briefs_languages_and_regions_count(fake_ask):
     def answer(prompt):
         return ScreenBatch(results=[
-            ScreenItem(domain="tilde.ee", holder_type="vendor", data_owner="company", data_match=5,
+            ScreenItem(domain="tilde.ee", holder_type="seller", data_owner="company", data_match=5,
                        languages=[" latvian", "French"], regions=["baltics "], volume_signal=4,
                        reason="Baltic speech data"),
-            ScreenItem(domain="global.com", holder_type="by_product", data_owner="customers", data_match=5,
+            ScreenItem(domain="global.com", holder_type="untapped", data_owner="customers", data_match=5,
                        languages=["French", "German"], regions=["Europe"], volume_signal=9,
                        reason="notetaker"),
         ])
@@ -202,18 +202,18 @@ def test_coverage_unknown_when_brief_names_no_languages_or_regions(fake_ask):
 def test_vendor_working_on_customers_data_is_by_product(fake_ask):
     def answer(prompt):
         return ScreenBatch(results=[
-            ScreenItem(domain="agency.lt", holder_type="vendor", data_owner="customers", data_match=4,
+            ScreenItem(domain="agency.lt", holder_type="seller", data_owner="customers", data_match=4,
                        languages=["English"], regions=[], volume_signal=None,
                        reason="interpreting and transcription agency"),
-            ScreenItem(domain="data.com", holder_type="vendor", data_owner="company", data_match=5,
+            ScreenItem(domain="data.com", holder_type="seller", data_owner="company", data_match=5,
                        languages=["English"], regions=[], volume_signal=None, reason="sells meeting datasets"),
         ])
 
     fake_ask.responses[ScreenBatch] = answer
     agency, seller = _cand("agency.lt"), _cand("data.com")
     screen(BRIEF, [agency, seller], fetch=lambda _: "text", progress=lambda _: None)
-    assert (agency.holder_type, agency.data_owner, agency.scores.licence) == ("by_product", "customers", 2)
-    assert (seller.holder_type, seller.scores.licence) == ("vendor", 4)
+    assert (agency.holder_type, agency.data_owner, agency.scores.licence) == ("untapped", "customers", 2)
+    assert (seller.holder_type, seller.scores.licence) == ("seller", 4)
 
 
 def test_screen_sends_homepage_and_source_page(fake_ask):
@@ -274,7 +274,7 @@ def test_source_excerpt_prefers_own_site_and_quotes_other_sites_around_the_menti
 
 
 def _answer(**kw):
-    item = dict(domain="acme.com", holder_type="by_product", data_owner="customers", data_match=5,
+    item = dict(domain="acme.com", holder_type="untapped", data_owner="customers", data_match=5,
                 languages=["English"], regions=[], volume_signal=3, reason="call recording service")
     return lambda prompt: ScreenBatch(results=[ScreenItem(**{**item, **kw})])
 
@@ -289,7 +289,7 @@ def test_only_must_have_contradictions_cap(fake_ask):
 
 def test_must_have_filters_exclude(fake_ask):
     fake_ask.responses[ScreenBatch] = _answer()
-    vendors_only = brief_with(sources=Pick(values=[VENDORS], importance="must"))
+    vendors_only = brief_with(sources=Pick(values=[SELLERS], importance="must"))
     c = _cand("acme.com")
     screen(vendors_only, [c], fetch=lambda _: "text", progress=lambda _: None)
     assert c.excluded and "not a source type the buyer accepts" in c.reason
@@ -299,7 +299,7 @@ def test_must_have_filters_exclude(fake_ask):
     screen(no_customer_data, [c], fetch=lambda _: "text", progress=lambda _: None)
     assert c.excluded and "customers' data" in c.reason
 
-    nice = brief_with(sources=Pick(values=[VENDORS]), customer_data=Pick(values=[CUSTOMER_EXCLUDE]))
+    nice = brief_with(sources=Pick(values=[SELLERS]), customer_data=Pick(values=[CUSTOMER_EXCLUDE]))
     c = _cand("acme.com")
     screen(nice, [c], fetch=lambda _: "text", progress=lambda _: None)
     assert not c.excluded and c.scores.licence == 1  # nice to have: scored down, not dropped

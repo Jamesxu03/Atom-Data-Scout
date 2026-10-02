@@ -21,6 +21,8 @@ import pandas as pd
 import streamlit as st
 
 from worker import pipeline, sessions
+from worker.archetypes import ARCHETYPES
+from worker.archetypes import BY_KEY as ARCHETYPE_BY_KEY
 from worker.brief_template import (
     CATEGORIES,
     CODE_LABELS,
@@ -45,8 +47,9 @@ EXAMPLE_BRIEF = (
 )
 LOGO = "assets/atom_logo.png"
 ICON = "assets/atom_icon.png"  # square: a wide logo gets squeezed into the browser tab's favicon
-HOLDER_LABELS = {"vendor": "Vendor", "public": "Public", "by_product": "By-product",
+HOLDER_LABELS = {"seller": "Seller", "collector": "Collector", "untapped": "Untapped holder", "public": "Public",
                  "technology": "Technology", "unrelated": "Unrelated", None: "Unknown"}
+SELLING_LABELS = {"open_to_it": "open to selling", "not_selling": "not selling", "unclear": "selling unclear"}
 VERDICT_ICONS = {"meets": "✅", "fails": "❌", "unclear": "❔"}
 LEGAL_NOTE = "Licence status is a screening flag from public pages, not legal advice."
 FACT_LABELS = {"price": "Price", "data_period": "Data years", "founded": "Founded"}
@@ -288,7 +291,18 @@ def licence_label(c: Candidate) -> str:
         return f"checked: {c.research.licence}"
     if c.holder_type in (None, "unrelated"):
         return "?"
-    return f"prior: {prior_label(c.holder_type, c.data_owner)}"
+    return f"prior: {prior_label(c)}"
+
+
+def type_label(c: Candidate) -> str:
+    """e.g. "Seller + collects", "Untapped holder · Kept by law · open to selling"."""
+    label = HOLDER_LABELS[c.holder_type]
+    if c.holder_type == "seller" and c.collects_to_order:
+        label += " + collects"
+    if c.holder_type == "untapped":
+        label += "".join(f" · {x}" for x in (c.archetype and ARCHETYPE_BY_KEY[c.archetype].label,
+                                             c.selling_status == "open_to_it" and SELLING_LABELS["open_to_it"]) if x)
+    return label
 
 
 def progress_panel(path: str) -> None:
@@ -374,6 +388,11 @@ def candidates_table(s: sessions.Session, path: str) -> None:
         help="Only companies with evidence for at least one of these") if s.brief.languages else []
     hide_unknown = right.toggle("Known volume", key=f"unknown-volume-{key}",
                                 help="Only companies whose volume is known. Most stay unknown until researched.")
+    kinds_present = [a for a in ARCHETYPES if any(c.archetype == a.key for c in s.discovery.candidates)]
+    kinds = mid.multiselect(
+        "Why untapped holders have it", [a.key for a in kinds_present], key=f"archetypes-{key}", placeholder="Any",
+        format_func=lambda k: ARCHETYPE_BY_KEY[k].label,
+        help="Narrows untapped holders to these reasons; other types are unaffected") if kinds_present else []
 
     def shown(c: Candidate) -> bool:
         if c.excluded:
@@ -382,6 +401,7 @@ def candidates_table(s: sessions.Session, path: str) -> None:
         return (c.holder_type in types
                 and (c.fit is None or c.fit >= min_fit)
                 and (not languages or any(lang in c.languages for lang in languages))
+                and (not kinds or c.holder_type != "untapped" or c.archetype in kinds)
                 and (volume >= min_volume if volume is not None else not hide_unknown))
 
     rows = [c for c in s.discovery.candidates if shown(c)]
@@ -393,7 +413,7 @@ def candidates_table(s: sessions.Session, path: str) -> None:
             {
                 "Fit": fmt(c.fit),
                 "Company": c.name,
-                "Type": HOLDER_LABELS[c.holder_type],
+                "Type": type_label(c),
                 "Licence": licence_label(c),
                 "Data match": fmt(c.scores.data_match),
                 "Coverage": fmt(c.scores.coverage),
@@ -468,6 +488,10 @@ def researched(s: sessions.Session, path: str, locked: bool) -> None:
                 if f := c.fact(k):
                     st.markdown(f"**{label}:** {fact_text(c, k)}\n\n> {f.quote}\n\n[{f.url}]({f.url})")
             st.markdown(f"**Data held:** {r.data_held}")
+            if c.holder_type == "untapped":
+                st.markdown(f"**Selling:** {SELLING_LABELS.get(c.selling_status, 'unclear')}")
+                for ev in r.selling_evidence:
+                    st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
             if r.checks:
                 st.markdown("**Checks against the brief**")
             for ch in r.checks:

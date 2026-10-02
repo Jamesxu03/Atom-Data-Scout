@@ -20,14 +20,17 @@ DISCOVERY = {
     "directory_hypotheses": 1,  # (c) one call per hypothesis; broad categories mostly add noise
     "marketplace_calls": 3,  # (d) one call per angle in channels.MARKETPLACE_ANGLES (max 3)
     "public_source_calls": 2,  # (e) one call per angle in channels.PUBLIC_ANGLES (max 2)
-    "distressed_calls": 1,  # (f) insolvent, in administration or shut down
+    "distressed_calls": 1,  # (f) insolvent, in administration, shut down or for sale
+    "signals_calls": 1,  # (g) untapped holders: privacy policies, data-safety labels, job ads, scale claims
+    "suppliers_calls": 1,  # (h) untapped holders: customers of the tools they run on, member directories
+    "records_calls": 1,  # (i) untapped holders: tenders, finished research projects, registers
     "companies_per_call": 10,
 }
 
-# Snowball only from by-product holders with fit >= SEED_FIT and evidence for the brief's
-# languages or regions. Technology providers drift into "alternatives to <hardware>" pages
-# full of unrelated device makers.
-SNOWBALL_SEED_TYPES = ["by_product"]
+# Snowball only from untapped holders (plus collectors when the buyer wants data recorded to
+# order) with fit >= SEED_FIT and evidence for the brief's languages or regions. Technology
+# providers drift into "alternatives to <hardware>" pages full of unrelated device makers.
+SNOWBALL_SEED_TYPES = ["untapped"]
 
 # Relevance screen: companies per Flash call
 SCREEN_BATCH_SIZE = 10

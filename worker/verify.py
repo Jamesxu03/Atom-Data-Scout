@@ -8,6 +8,9 @@ import unicodedata
 TEL_RE = re.compile(r'href=["\']tel:([^"\']+)["\']', re.I)
 PHONE_IN_TEXT = re.compile(r"\+?\d[\d\s().-]{5,}\d")
 MIN_QUOTE_WORDS = 4  # shorter quotes ("we sell data") match too many pages to prove anything
+# Price and age quotes must also contain the value's numbers, so a short one still proves it
+# ("Founded in 2016", "£500 per hour")
+MIN_FACT_QUOTE_WORDS = 2
 
 
 def strip_code(html: str) -> str:
@@ -56,11 +59,11 @@ def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip(" .'\u2026")
 
 
-def quote_in_text(quote: str, text: str) -> bool:
+def quote_in_text(quote: str, text: str, min_words: int = MIN_QUOTE_WORDS) -> bool:
     """The quote appears in plain text, ignoring case, spacing, double quotes and curly
-    apostrophes. Quotes of fewer than MIN_QUOTE_WORDS words never count."""
+    apostrophes. Quotes of fewer than min_words words never count."""
     q = _normalise(quote)
-    if len(q.split()) < MIN_QUOTE_WORDS:
+    if len(q.split()) < min_words:
         return False
     text = _normalise(text)
     # the model often joins two passages with "..." — each part must be on the page
@@ -68,8 +71,8 @@ def quote_in_text(quote: str, text: str) -> bool:
 
 
 
-def quote_on_page(quote: str, html: str) -> bool:
-    return quote_in_text(quote, html_lib.unescape(visible_text(html)))
+def quote_on_page(quote: str, html: str, min_words: int = MIN_QUOTE_WORDS) -> bool:
+    return quote_in_text(quote, html_lib.unescape(visible_text(html)), min_words)
 
 
 def _numbers(s: str) -> set[str]:

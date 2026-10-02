@@ -1,7 +1,7 @@
 import httpx
 
 from tests.test_hypotheses import BRIEF, brief_with
-from worker.brief_template import BY_PRODUCT, DISTRESSED, VENDORS, Pick
+from worker.brief_template import DISTRESSED, SELLERS, UNTAPPED, Pick
 from worker.config import DISCOVERY
 from worker.discovery import Discovery, Hit, channels, discover, merge, pick_seeds, snowball
 from worker.discovery.domains import normalize_domain
@@ -51,12 +51,12 @@ def test_merge_dedupes_by_domain_and_keeps_all_sources():
 def test_merge_carries_over_everything_it_does_not_build():
     hits = [Hit(channel="product_search", name="Otter", website="https://otter.ai", source_url="s")]
     (old,) = merge(hits)
-    old.reason, old.holder_type, old.fit = "notetaker", "by_product", 4.2
+    old.reason, old.holder_type, old.fit = "notetaker", "untapped", 4.2
     old.scores = Scores(data_match=5, coverage=5)
     old.contacts = [Contact(email="a@otter.ai", source_url="s")]
     old.email = EmailDraft(subject="Hello", body="Hi")
     (new,) = merge(hits + [Hit(channel="snowball", name="Otter", website="otter.ai", source_url="s2")], previous=[old])
-    assert (new.reason, new.holder_type, new.fit, new.scores) == ("notetaker", "by_product", 4.2, old.scores)
+    assert (new.reason, new.holder_type, new.fit, new.scores) == ("notetaker", "untapped", 4.2, old.scores)
     assert new.contacts == old.contacts and new.email == old.email
     assert new.channels == ["product_search", "snowball"]  # rebuilt from the hits
 
@@ -85,6 +85,11 @@ def _router(prompt: str) -> FoundList:
     if "not only companies" in prompt:
         return FoundList(companies=[Found(name="Parliament", website="https://parliament.example",
                                           source_url="https://parliament.example/sessions")])
+    for phrase, name in (("signs on their own pages", "Callcentre"), ("logo walls", "Toolcustomer"),
+                         ("public tenders", "Tenderwinner")):
+        if phrase in prompt:
+            return FoundList(companies=[Found(name=name, website=f"https://{name.lower()}.example",
+                                              source_url=f"https://{name.lower()}.example/privacy")])
     query = prompt.split("- query ")[1].split("\n")[0]
     return FoundList(companies=[
         Found(name="Otter", website="https://otter.ai", source_url="https://google.com/1"),
@@ -98,8 +103,9 @@ def test_discover_runs_phase_one_channels_within_budget(fake_ask):
 
     angles = min(DISCOVERY["marketplace_calls"], len(channels.MARKETPLACE_ANGLES))
     public = min(DISCOVERY["public_source_calls"], len(channels.PUBLIC_ANGLES))
+    untapped = DISCOVERY["signals_calls"] + DISCOVERY["suppliers_calls"] + DISCOVERY["records_calls"]
     expected = (DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"] + angles + public
-                + DISCOVERY["distressed_calls"])
+                + DISCOVERY["distressed_calls"] + untapped)
     assert len(fake_ask.calls) == expected
     assert all(c.use_search for c in fake_ask.calls)
     assert not any("compete with" in c.prompt for c in fake_ask.calls)  # no snowball yet
@@ -116,29 +122,36 @@ def test_discover_runs_phase_one_channels_within_budget(fake_ask):
     assert by_domain["dataco.io"].channels == ["marketplace"]
     assert by_domain["parliament.example"].channels == ["public_source"]
     assert by_domain["bust.example"].channels == ["distressed"]
+    assert [by_domain[f"{n}.example"].channels for n in ("callcentre", "toolcustomer", "tenderwinner")] == [
+        ["signals"], ["suppliers"], ["records"]]
     assert len(d.hits) > len(d.candidates)
     assert not d.partial
 
 
 def test_discover_only_runs_channels_for_the_source_types_picked(fake_ask):
     fake_ask.responses[FoundList] = _router
-    discover(brief_with(sources=Pick(values=[BY_PRODUCT])), HYPS, **QUIET)
+    discover(brief_with(sources=Pick(values=[UNTAPPED])), HYPS, **QUIET)
     assert not any("already produce or sell data" in c.prompt for c in fake_ask.calls)
     assert not any("not only companies" in c.prompt or "insolvency notices" in c.prompt for c in fake_ask.calls)
-    assert len(fake_ask.calls) == DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"]
+    assert len(fake_ask.calls) == DISCOVERY["product_search_hypotheses"] + DISCOVERY["directory_hypotheses"] + 3
+    (signals,) = [c.prompt for c in fake_ask.calls if "signs on their own pages" in c.prompt]
+    assert "Kept by law" in signals and "we retain recordings for" in signals  # the archetype checklist
+    (suppliers,) = [c.prompt for c in fake_ask.calls if "logo walls" in c.prompt]
+    assert "call-recording and contact-centre platforms" in suppliers  # tools for the audio modality
 
     fake_ask.calls.clear()
-    d = discover(brief_with(sources=Pick(values=[VENDORS, DISTRESSED]), exclusions=Pick(values=["dataco.io"])),
+    d = discover(brief_with(sources=Pick(values=[SELLERS, DISTRESSED]), exclusions=Pick(values=["dataco.io"])),
                  HYPS, **QUIET)
     prompts = [c.prompt for c in fake_ask.calls]
     assert not any("- query " in p for p in prompts)  # no product search or directories
-    assert sum("already produce or sell data" in p for p in prompts) == 2  # collection services, datasets
+    assert sum("already produce or sell data" in p for p in prompts) == 1  # published datasets
+    assert not any("signs on their own pages" in p for p in prompts)  # no untapped-holder channels
     assert sum("insolvency notices" in p for p in prompts) == 1
     assert "dataco.io" not in {c.domain for c in d.candidates} and d.exclusions == ["dataco.io"]
 
 
 def test_pick_seeds_uses_explicit_then_well_scored_by_product_holders():
-    def cand(domain, fit, channels, holder="by_product", coverage=5):
+    def cand(domain, fit, channels, holder="untapped", coverage=5):
         return Candidate(name=domain, website=f"https://{domain}", domain=domain, channels=channels,
                          source_urls=[], reason="r", fit=fit, holder_type=holder,
                          scores=Scores(data_match=5, coverage=coverage))
@@ -154,7 +167,7 @@ def test_pick_seeds_uses_explicit_then_well_scored_by_product_holders():
         cand("global.com", 4.6, ["product_search", "directory"], coverage=1),
         # well corroborated, but alternatives to a tracking-hardware maker drift off topic
         cand("tracker.com", 3.0, ["product_search", "directory", "snowball"], holder="technology"),
-        cand("vendor.com", 4.9, ["product_search", "directory", "marketplace"], holder="vendor"),
+        cand("vendor.com", 4.9, ["product_search", "directory", "marketplace"], holder="seller"),
     ]
     seeds = pick_seeds(cands, explicit=[("Fireflies", "https://fireflies.ai")])
     assert [w for _, w in seeds] == ["https://fireflies.ai", "https://best.com", "https://two.com",

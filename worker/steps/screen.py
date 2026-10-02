@@ -1,14 +1,16 @@
 """Screen: homepage + the page search found the company on, one Flash call per batch -> the
-holder type (vendor / public / by-product / technology / unrelated), who owns the data, how
+holder type (seller / collector / untapped holder / public / technology / unrelated), who
+owns the data, for untapped holders why they hold it (archetype) and whether they seem open to
+selling, how
 well it matches the brief (1 to 5), evidence for the buyer's languages and regions, signs
 of scale, and any price, founding year or data period the pages state (kept only with a quote
 found on the page). Scores and fit are then computed in Python (see scoring.py).
 
 Rules the model doesn't apply reliably are enforced afterwards (see _apply): only the
-buyer's languages and regions count, only must-have categories can be contradicted, and a
-"vendor" whose data belongs to its customers is a service, so a by-product holder. Unrelated
-companies, dead websites and companies a must-have filter rules out (E1 source types, D6
-customers' data) are excluded.
+buyer's languages and regions count, only must-have categories can be contradicted, a
+"seller" whose data belongs to its customers is a service, so an untapped holder, and archetype
+and selling status apply to untapped holders only. Unrelated companies, dead websites and
+companies a must-have filter rules out (E1 source types, D6 customers' data) are excluded.
 """
 
 import re
@@ -20,7 +22,8 @@ import httpx
 import trafilatura
 from pydantic import BaseModel, Field
 
-from worker import llm
+from worker import archetypes, llm
+from worker.archetypes import ArchetypeKey
 from worker.brief_template import CATEGORIES, CUSTOMER_EXCLUDE, Brief
 from worker.config import (
     MODEL,
@@ -33,9 +36,9 @@ from worker.crawl import fetch_homepage_text, fetch_html_quick, same_site
 from worker.discovery.channels import GROUNDING_REDIRECT, mention_at
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
-from worker.schemas import FACTS, Candidate, DataOwner, Fact, HolderType, Scores
+from worker.schemas import FACTS, Candidate, DataOwner, Fact, HolderType, Scores, SellingStatus
 from worker.scoring import rescore
-from worker.verify import quote_in_text, value_in_quote
+from worker.verify import MIN_FACT_QUOTE_WORDS, quote_in_text, value_in_quote
 
 
 class Stated(BaseModel):
@@ -47,6 +50,9 @@ class ScreenItem(BaseModel):
     domain: str
     holder_type: HolderType
     data_owner: DataOwner = Field(description="Who controls the data this company holds")
+    collects_to_order: bool = Field(default=False, description="Offers to record or collect this data to order")
+    archetype: ArchetypeKey | None = Field(default=None, description="Untapped holders only")
+    selling_status: SellingStatus | None = Field(default=None, description="Untapped holders only")
     data_match: int = Field(description="1 to 5: how closely its data matches the buyer's")
     languages: list[str] = Field(description="The buyer's languages it shows evidence of working in")
     regions: list[str] = Field(description="The buyer's regions it shows evidence of working in")
@@ -83,15 +89,19 @@ it holds, how well its data matches, which of the buyer's languages and regions 
 and how much data it is likely to hold.
 
 holder_type:
-- "vendor": sells or licenses this kind of data that it owns, or collects it to order as its
-  main business (dataset vendors, data collection companies). A vendor's data is its own:
-  an agency that transcribes, translates, interprets or records its clients' material is
-  "by_product", not "vendor".
+- "seller": already holds this kind of data and sells or licenses it: a dataset catalogue,
+  off-the-shelf datasets, marketplace listings, "license our data". Its data is its own. If it
+  also collects to order, it is still a seller (set collects_to_order).
+- "collector": records, collects or annotates this kind of data to a client's specification as
+  a service (collection campaigns, crowdsourced recording, annotation), with no matching
+  off-the-shelf data on these pages.
+- "untapped": holds this kind of data because of what it does, but doesn't sell it: its
+  product or service records it, the law makes it keep it, it has production leftovers, it
+  closed or was acquired, its devices record it, and so on (see archetype). Includes agencies
+  that transcribe, translate, interpret or record their clients' material.
 - "public": a public body, research institute, university or non-profit repository that
   records, publishes or distributes this kind of data (e.g. corpora, parliament or council
   session recordings, broadcast archives).
-- "by_product": its product or service captures this kind of data in normal operation,
-  even though it doesn't sell data (including agencies working on their clients' data).
 - "technology": makes hardware, software or tools that work with this kind of data (e.g.
   sensors, devices, tracking or analysis software) but doesn't itself capture or keep it at
   scale. At most it holds internal R&D or training data.
@@ -101,10 +111,20 @@ holder_type:
 
 data_owner:
 - "company": the organisation recorded or collected the data itself (its own staff,
-  contractors or devices), so it could license it. Always the case for a vendor.
+  contractors or devices), so it could license it. Always the case for a seller.
 - "customers": the data is recorded by or for its customers, who own it; licensing it would
   need their permission.
 - "unclear": can't tell from these pages.
+
+collects_to_order: true if it offers to record or collect this kind of data to a client's
+specification (a collector always does; a seller sometimes does).
+
+archetype (untapped holders only, otherwise null): why it holds the data, one of:
+{archetypes}
+
+selling_status (untapped holders only, otherwise null): "open_to_it" if these pages mention
+data partnerships, licensing its data or AI training data; "not_selling" if nothing suggests
+it; "unclear" if you can't tell.
 
 data_match (1 to 5):
 - 5: its core business clearly involves this kind of data, with the buyer's must-have and
@@ -127,8 +147,9 @@ empty list if there's no evidence or the buyer named no regions.
 
 volume_signal (1 to 5, or null): signs of scale on these pages, such as customer or user
 counts, hours or calls processed, or a stated dataset size, judged against the volume
-wanted from one seller. 5: clearly more than that; 3: substantial; 1: tiny. null if the pages
-give no sign of scale.
+wanted from one seller. For a collector, judge its capacity instead: contributor network
+size, languages covered, past project sizes. 5: clearly more than that; 3: substantial; 1:
+tiny. null if the pages give no sign of scale.
 
 contradicts: keys from the must-have list that these pages clearly contradict, e.g.
 "modality" for a company that only handles text when audio is a must-have. Leave it empty
@@ -190,6 +211,7 @@ def _screen_batch(brief: Brief, batch: list[Fetched]) -> dict[str, ScreenItem]:
         regions=", ".join(brief.regions) or "any",
         volume=brief.volume_wanted(),
         musts=_musts(brief),
+        archetypes=archetypes.guide(brief.chosen("modality")),
         companies=companies,
     )
     result = llm.ask(prompt, ScreenBatch, model=MODEL)
@@ -221,7 +243,7 @@ def _stated_facts(c: Candidate, item: ScreenItem, home: str, src: str | None) ->
         s = getattr(item, key)
         if not s or not value_in_quote(s.value, s.quote):
             continue
-        if url := next((u for u, text in pages if quote_in_text(s.quote, text)), None):
+        if url := next((u for u, text in pages if quote_in_text(s.quote, text, MIN_FACT_QUOTE_WORDS)), None):
             setattr(c, key, Fact(value=s.value, quote=s.quote, url=url))
 
 
@@ -234,13 +256,18 @@ def _apply(brief: Brief, c: Candidate, item: ScreenItem, home: str = "", src: st
     c.regions = _buyers(brief.regions, item.regions)
     _stated_facts(c, item, home, src)
     c.contradicts = [k for k in dict.fromkeys(item.contradicts) if k in CATEGORIES and brief.must(k)]
-    if c.holder_type == "vendor" and c.data_owner == "customers":
-        c.holder_type = "by_product"  # works on its clients' data: a service, not a data seller
+    c.collects_to_order = item.collects_to_order or c.holder_type == "collector"
+    if c.holder_type == "seller" and c.data_owner == "customers":
+        c.holder_type = "untapped"  # works on its clients' data: a service, not a data seller
+    untapped = c.holder_type == "untapped"
+    c.archetype = (item.archetype or "service") if untapped else None
+    c.selling_status = (item.selling_status or "unclear") if untapped else None
     c.excluded = c.holder_type == "unrelated"
     if not c.excluded and not brief.accepts_holder(c.holder_type):
         c.excluded, c.reason = True, f"{c.reason} (not a source type the buyer accepts)"
-    if (not c.excluded and c.data_owner == "customers" and brief.must("customer_data")
-            and CUSTOMER_EXCLUDE in brief.active("customer_data")):
+    # a collector records new data for us, so whose its past clients' data is doesn't matter
+    if (not c.excluded and c.data_owner == "customers" and c.holder_type != "collector"
+            and brief.must("customer_data") and CUSTOMER_EXCLUDE in brief.active("customer_data")):
         c.excluded, c.reason = True, f"{c.reason} (holds its customers' data, which the buyer excludes)"
     c.scores = Scores(data_match=max(1, min(5, item.data_match)))
     rescore(c, brief, volume_signal=item.volume_signal)

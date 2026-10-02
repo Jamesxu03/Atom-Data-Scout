@@ -13,12 +13,13 @@ def _discovery():
     fits = {"otter.ai": 4.0, "fireflies.ai": 4.5, "acmedata.io": 1.2}
     for c in cands:
         c.reason, c.fit, c.excluded = "r", fits[c.domain], c.domain == "acmedata.io"
+        c.holder_type = "untapped"
     return Discovery(hits=hits, candidates=cands)
 
 
 SEEDS = [
-    Seed(name="Otter", website="otter.ai"),
-    Seed(name="Fireflies.ai", website="https://www.fireflies.ai/"),
+    Seed(name="Otter", website="otter.ai", type="untapped"),
+    Seed(name="Fireflies.ai", website="https://www.fireflies.ai/", type="seller"),
     Seed(name="ACME Data Limited"),  # no website: match by name
     Seed(name="Missing Co", website="missing.com"),
 ]
@@ -41,6 +42,7 @@ def test_report():
     assert "Rank of found seeds among 3: median 2, top 10: 3" in r
     assert "#1 Fireflies.ai 4.5" in r and "#2 Otter 4.0" in r
     assert "WARNING" in r and "Otter" in r  # Otter was a snowball seed
+    assert "matches the expected one for 1/2 found seeds" in r and "Fireflies.ai: expected seller, screened untapped" in r
 
 
 def test_empty_seed_file_is_friendly(tmp_path):

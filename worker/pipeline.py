@@ -19,7 +19,7 @@ from worker import sessions
 from worker.brief_template import Brief
 from worker.config import PARALLEL_CRAWLS
 from worker.crawl import CrawlResult, crawl
-from worker.discovery import Discovery, check_sources, discover, pick_seeds, snowball
+from worker.discovery import Discovery, check_sources, discover, pick_seeds, seed_types, snowball
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
 from worker.schemas import FACTS, Candidate, Funnel
@@ -93,7 +93,7 @@ def search(session: Session, progress: Progress = print, seeds: list[tuple[str, 
             raise QuotaExceeded("quota ran out during discovery")
         check_and_screen("Screen")
 
-        seed_list = pick_seeds(session.discovery.candidates, explicit=list(seeds))
+        seed_list = pick_seeds(session.discovery.candidates, explicit=list(seeds), types=seed_types(brief))
         if seed_list:
             with timer.step("Snowball searches", f"Snowballing from {len(seed_list)} relevant companies"):
                 session.discovery = snowball(session.discovery, seed_list, brief.languages, brief.regions,
@@ -131,6 +131,8 @@ def research(
         errors = [f"{c.domain}: crawl {e}" for e in cr.errors if e.startswith("homepage")]
         progress(f"Researching {c.domain}")
         c.research = research_company(brief, c, cr)
+        if c.holder_type == "untapped" and c.research.selling_evidence:  # verified: replaces the screen's guess
+            c.selling_status = c.research.selling_status
         progress(f"Finding contacts: {c.domain}")
         try:
             c.contacts = find_contacts(c, cr)

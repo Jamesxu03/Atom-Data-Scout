@@ -11,6 +11,7 @@ Unknown evidence stays neutral: an unknown score is left out and the weights res
 
 from worker.brief_template import (
     COMMERCIAL,
+    CUSTOM_COLLECTION,
     CUSTOMER_CONSENT,
     CUSTOMER_EXCLUDE,
     EXCLUSIVE,
@@ -25,7 +26,7 @@ from worker.config import (
     RELEVANT_FIT,
     TECHNOLOGY_CAP,
 )
-from worker.schemas import Candidate, DataOwner, HolderType
+from worker.schemas import Candidate
 
 
 def clamp(score: int | None) -> int | None:
@@ -44,29 +45,36 @@ def coverage(brief: Brief, languages: list[str], regions: list[str]) -> int | No
 
 # Before research: how likely the data can be licensed, from what the screen saw
 _PRIORS: dict[tuple[str, str | None], tuple[int, str]] = {
-    ("vendor", "company"): (4, "likely sellable"),
-    ("by_product", "company"): (3, "may be licensable"),
-    ("by_product", "customers"): (2, "likely needs consent"),
+    ("seller", "company"): (4, "likely sellable"),
+    ("untapped", "company"): (3, "may be licensable"),
+    ("untapped", "customers"): (2, "likely needs consent"),
 }
 
 
-def _prior(holder_type: HolderType | None, data_owner: DataOwner | None) -> tuple[int | None, str]:
-    if holder_type == "public":
+def _prior(c: Candidate) -> tuple[int | None, str]:
+    if c.holder_type == "public":
         return 3, "likely open or restricted"
-    if holder_type == "technology":
+    if c.holder_type == "technology":
         return 2, "likely internal data only"
-    return _PRIORS.get((holder_type, data_owner), (None, "owner unclear"))
+    if c.holder_type == "collector":
+        return 4, "commissioned data, rights negotiable"
+    if c.holder_type == "untapped" and c.archetype == "kept_by_law":
+        return 2, "kept to meet regulation, likely needs consent"
+    score, label = _PRIORS.get((c.holder_type, c.data_owner), (None, "owner unclear"))
+    if c.selling_status == "open_to_it" and score is not None:
+        return min(5, score + 1), f"{label}, open to selling"
+    return score, label
 
 
-def prior_label(holder_type: HolderType | None, data_owner: DataOwner | None) -> str:
-    return _prior(holder_type, data_owner)[1]
+def prior_label(c: Candidate) -> str:
+    return _prior(c)[1]
 
 
 def licence_prior(c: Candidate, brief: Brief) -> int | None:
     """D6 decides what data held for customers is worth: needing consent (2), nothing (1), or
-    left to check later (neutral)."""
-    score = _prior(c.holder_type, c.data_owner)[0]
-    if c.data_owner == "customers":
+    left to check later (neutral). Not for collectors: they record new data for us."""
+    score = _prior(c)[0]
+    if c.data_owner == "customers" and c.holder_type != "collector":
         d6 = brief.active("customer_data")
         if CUSTOMER_EXCLUDE in d6:
             return 1
@@ -109,8 +117,11 @@ def must_failures(c: Candidate, brief: Brief) -> list[str]:
                 fails.append("licence")
     if brief.must("volume") and c.scores.volume == 1:
         fails.append("volume")
-    if brief.must("customer_data") and c.data_owner == "customers" and CUSTOMER_EXCLUDE in brief.active("customer_data"):
+    if (brief.must("customer_data") and c.data_owner == "customers" and c.holder_type != "collector"
+            and CUSTOMER_EXCLUDE in brief.active("customer_data")):
         fails.append("customer_data")
+    if c.holder_type == "collector" and brief.must("delivery") and CUSTOM_COLLECTION not in brief.active("delivery"):
+        fails.append("delivery")  # the buyer wants existing data, not data recorded to order
     return list(dict.fromkeys(fails))
 
 

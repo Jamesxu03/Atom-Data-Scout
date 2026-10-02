@@ -4,7 +4,7 @@ import re
 
 import httpx
 
-from worker import llm
+from worker import archetypes, llm
 from worker.brief_template import Brief
 from worker.config import DISCOVERY, MODEL
 from worker.crawl import fetch_html_quick
@@ -208,17 +208,86 @@ similar to this:
 {PUBLIC_ANGLES[angle].format(data_type=brief.description)}{local}""")
 
 
+def _kinds(hypotheses: list[HolderHypothesis]) -> str:
+    return "\n".join(f"- {h.category}" for h in hypotheses[:5])
+
+
 def distressed(brief: Brief, hypotheses: list[HolderHypothesis]) -> list[Found]:
-    """(f) Companies that held this kind of data and are insolvent, in administration, being
-    wound up or have shut down: their data is often sold off with the other assets."""
-    kinds = "\n".join(f"- {h.category}" for h in hypotheses[:5])
-    return _search(f"""Find companies that are insolvent, in administration, in liquidation,
-being wound up, have shut down, or are selling their assets, and that held data similar to this:
+    """(f) Companies that held this kind of data and are insolvent, shut down, retired the
+    product after an acquisition, or are for sale: their data is often sold with the assets or
+    sits forgotten in storage."""
+    return _search(f"""Find companies that held data similar to this and are insolvent, in
+administration or liquidation, being wound up, have shut down, retired the product after being
+acquired, or are up for sale:
 {_wanted(brief)}
 
 Kinds of business likely to hold it:
-{kinds}
+{_kinds(hypotheses)}
 
 Search insolvency notices and gazettes, administrators' and liquidators' asset sale pages,
-news of shutdowns, and "company shuts down" or "acquired for its data" stories.
-source_url must be the notice, sale page or article.""")
+bankruptcy filings that list data as an asset, liquidation auctions, marketplaces where small
+companies are sold (e.g. Acquire.com, Flippa), "we're shutting down" and "sunsetting" posts,
+startup obituary lists, and "acquired" news where the product was then switched off.
+source_url must be the notice, sale page, listing or article.""")
+
+
+def signals(brief: Brief, hypotheses: list[HolderHypothesis]) -> list[Found]:
+    """(g) Untapped holders found by what their own pages give away: privacy policies that say
+    they record and keep the data, app data-safety labels, job ads for in-house transcribers or
+    annotators, and scale claims."""
+    return _search(f"""Find companies that hold data similar to this without selling it, by
+looking for signs on their own pages:
+{_wanted(brief)}
+
+Why companies end up holding data like this:
+{archetypes.guide(brief.chosen("modality"))}
+
+Search for:
+- privacy policies and terms that say they record and keep this kind of data, e.g. "calls may
+  be recorded", "we retain recordings for", "used to improve our services and train our models"
+- app store data-safety sections that list collecting this kind of data
+- job ads for in-house transcriptionists, call-quality analysts or data annotators
+- annual reports and case studies with scale claims, e.g. "40 million calls handled"
+Skip companies that already sell or license data. source_url must be the policy, listing, job
+ad or report.""")
+
+
+def suppliers(brief: Brief, hypotheses: list[HolderHypothesis]) -> list[Found]:
+    """(h) Untapped holders found through the customer lists of the tools they run on, and
+    member and exhibitor lists of their industry."""
+    tools = ", ".join(archetypes.supplier_tools(brief.chosen("modality")))
+    return _search(f"""Find companies likely to hold data similar to this, through the
+suppliers and associations they use:
+{_wanted(brief)}
+
+Kinds of business likely to hold it:
+{_kinds(hypotheses)}
+
+Search:
+- case studies, customer stories and logo walls of tools these companies run on ({tools}).
+  Every customer that records this kind of data with the tool is a candidate.
+- member directories of their trade associations, and exhibitor and sponsor lists of their
+  industry events.
+Return the customer or member companies, not the tool vendor or the association. source_url
+must be the case study, customer page or directory.""")
+
+
+def records(brief: Brief, hypotheses: list[HolderHypothesis]) -> list[Found]:
+    """(i) Untapped holders found in public records: tenders, finished research projects,
+    data-protection registers and papers that thank a company for data."""
+    return _search(f"""Find organisations likely to hold data similar to this, through public
+records:
+{_wanted(brief)}
+
+Kinds of business likely to hold it:
+{_kinds(hypotheses)}
+
+Search:
+- public tenders and contract awards for services that capture this kind of data (e.g. call
+  handling, transcription, CCTV, fleet cameras) on TED, Contracts Finder, SAM.gov, Etimad and
+  national portals: return the supplier that won
+- research project databases (CORDIS, UKRI, NIH RePORTER) for finished projects that collected
+  this kind of data: return the partner organisations
+- data-protection registers and published impact assessments that mention recording it
+- research papers and Kaggle competitions where a company provided this kind of data
+source_url must be the tender, project, register entry or paper.""")

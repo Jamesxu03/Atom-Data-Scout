@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from worker.archetypes import ArchetypeKey
 from worker.brief_template import (
     CATEGORIES,
     COMMERCIAL,
@@ -37,13 +38,18 @@ class Facts(BaseModel):
 FACTS = tuple(Facts.model_fields)
 
 
-# vendor: sells data it owns or collects it to order; public: a public body, research institute
-# or repository that publishes it (corpora, parliament recordings); by_product: its product or
-# service captures it in normal operation; technology: makes tools or hardware for it but
-# doesn't keep it at scale
-HolderType = Literal["vendor", "public", "by_product", "technology", "unrelated"]
+# seller: already holds this kind of data and sells or licenses it; collector: records or
+# annotates it to a client's spec as a service; untapped: holds it because of what it does (see
+# worker/archetypes.py) but doesn't sell it; public: a public body, research institute or
+# repository that publishes it; technology: makes tools or hardware for it but doesn't keep it
+# at scale
+HolderType = Literal["seller", "collector", "untapped", "public", "technology", "unrelated"]
 DataOwner = Literal["company", "customers", "unclear"]
-Channel = Literal["product_search", "snowball", "directory", "marketplace", "public_source", "distressed"]
+# Untapped holders only. open_to_it: pages mention data partnerships, licensing or AI training data
+SellingStatus = Literal["not_selling", "open_to_it", "unclear"]
+Channel = Literal["product_search", "snowball", "directory", "marketplace", "public_source", "distressed",
+                  "signals", "suppliers", "records"]
+_OLD_HOLDER_TYPES = {"vendor": "seller", "by_product": "untapped"}
 
 
 class HolderHypothesis(BaseModel):
@@ -123,6 +129,8 @@ class Research(Facts):
     volume_score: int | None = Field(description="1 to 5 against the buyer's volume; null if unknown")
     volume_evidence: list[Evidence]
     checks: list[Check] = Field(default=[], description="One per requirement listed under Checks")
+    selling_status: SellingStatus | None = Field(default=None, description="Untapped holders only")
+    selling_evidence: list[Evidence] = Field(default=[], description="Quotes showing the selling status")
 
     @model_validator(mode="before")
     @classmethod
@@ -155,6 +163,9 @@ class Candidate(Facts):
     reason: str | None = None
     holder_type: HolderType | None = None
     data_owner: DataOwner | None = None
+    collects_to_order: bool = False  # records or collects this kind of data to a client's spec
+    archetype: ArchetypeKey | None = None  # untapped holders: why they hold the data
+    selling_status: SellingStatus | None = None  # untapped holders
     languages: list[str] = Field(default=[], description="Buyer's languages it shows evidence of working in")
     regions: list[str] = Field(default=[], description="Buyer's regions it shows evidence of working in")
     scores: Scores = Scores()
@@ -165,6 +176,14 @@ class Candidate(Facts):
     research: Research | None = None
     contacts: list[Contact] = []
     email: EmailDraft | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade(cls, data):
+        """Sessions saved before vendors were split into sellers and collectors."""
+        if isinstance(data, dict) and data.get("holder_type") in _OLD_HOLDER_TYPES:
+            data = {**data, "holder_type": _OLD_HOLDER_TYPES[data["holder_type"]]}
+        return data
 
     @property
     def screened(self) -> bool:

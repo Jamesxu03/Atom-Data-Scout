@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel, Field
 
-from worker import llm
+from worker import archetypes, llm
 from worker.brief_template import Brief
 from worker.config import HYPOTHESES_THINKING_LEVEL, MODEL
 from worker.schemas import HolderHypothesis
@@ -18,10 +18,11 @@ accumulated them as a by-product of running their service.
 
 Your job: list 5 to 10 distinct categories of business likely to hold this data.
 
-Think broadly:
-- Businesses whose product captures this data in normal operation (e.g. recording, hosting,
-  transcribing, moderating, customer support).
-- Businesses whose staff or contractors produced it (e.g. labelling, research, outsourcing).
+Think broadly. Cover different reasons a business ends up holding data like this, not only the
+obvious one; use these as a checklist:
+{archetypes}
+
+Also:
 - Companies anywhere in the world, not only in the buyer's country; where the buyer names
   languages or regions, include businesses based in or serving them.
 - Niche or regional players, not just the famous ones.
@@ -52,7 +53,7 @@ The buyer wants:
 
 
 def hypotheses(brief: Brief) -> list[HolderHypothesis]:
-    prompt = PROMPT.format(brief=brief.summary("S"))
+    prompt = PROMPT.format(brief=brief.summary("S"), archetypes=archetypes.guide(brief.chosen("modality")))
     result = llm.ask(prompt, HypothesisList, model=MODEL, thinking=HYPOTHESES_THINKING_LEVEL)
     return result.hypotheses
 

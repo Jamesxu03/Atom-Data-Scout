@@ -1,12 +1,16 @@
 """Discovery: search channels in parallel, check sources, merge and dedupe by domain.
 
 Two phases, so snowballing only starts from companies the screen scored well:
-  discover()       — (a) product search, (c) directories, (d) data vendors (marketplaces,
-                     collection services, published datasets), (e) public sources (open
-                     corpora, public bodies that publish recordings), (f) distressed or
-                     insolvent companies. With source types (E1) picked, only their channels run.
-  snowball()       — (b) "alternatives to X" from explicit seeds + well-scored by-product
-                     holders, limited to competitors working in the buyer's languages/regions
+  discover()       — (a) product search, (c) directories, (d) sellers and collectors
+                     (marketplaces, collection services, published datasets), (e) public sources
+                     (open corpora, public bodies that publish recordings), (f) distressed,
+                     closed or for-sale companies, and three more ways to find untapped holders:
+                     (g) signals they hold data (privacy policies, data-safety labels, job ads),
+                     (h) customer lists of the tools they run on, (i) public records (tenders,
+                     grants, registers). With source types (E1) picked, only their channels run.
+  snowball()       — (b) "alternatives to X" from explicit seeds + well-scored untapped holders
+                     (and collectors, when the buyer wants data recorded to order), limited to
+                     competitors working in the buyer's languages/regions
   check_sources()  — confirm source pages before screening, which reads them too
 
 Domains in the brief's exclusions never become candidates.
@@ -17,13 +21,15 @@ from collections.abc import Callable
 from pydantic import BaseModel
 
 from worker.brief_template import (
-    BY_PRODUCT,
+    COLLECTORS,
+    CUSTOM_COLLECTION,
     DISTRESSED,
     MARKETPLACES,
     PUBLIC_BODIES,
     RESEARCH_INSTITUTES,
+    SELLERS,
     TECHNOLOGY,
-    VENDORS,
+    UNTAPPED,
     Brief,
 )
 from worker.config import (
@@ -129,8 +135,8 @@ def _run_channels(tasks, progress: Progress) -> tuple[list[Hit], list[str], bool
 # E1 source type -> the channel angles that look for it
 ANGLE_SOURCES = {
     "marketplace listings": {MARKETPLACES},
-    "collection services": {VENDORS},
-    "published datasets": {VENDORS, RESEARCH_INSTITUTES},
+    "collection services": {COLLECTORS},
+    "published datasets": {SELLERS, RESEARCH_INSTITUTES},
     "open corpora": {RESEARCH_INSTITUTES, PUBLIC_BODIES},
     "public recordings": {PUBLIC_BODIES},
 }
@@ -147,7 +153,8 @@ def discover(brief: Brief, hypotheses: list[HolderHypothesis], progress: Progres
     def angles(names, budget):
         return [a for a in names if looks_for(*ANGLE_SOURCES[a])][:budget]
 
-    products = looks_for(BY_PRODUCT, TECHNOLOGY)
+    products = looks_for(UNTAPPED, TECHNOLOGY)
+    untapped = looks_for(UNTAPPED)
     tasks = [
         (f"(a) product search: {h.category}", lambda h=h: channels.product_search(h),
          {"channel": "product_search", "hypothesis": h.category})
@@ -164,8 +171,15 @@ def discover(brief: Brief, hypotheses: list[HolderHypothesis], progress: Progres
          {"channel": "public_source"})
         for angle in angles(channels.PUBLIC_ANGLES, DISCOVERY["public_source_calls"])
     ] + [
-        ("(f) distressed companies", lambda: channels.distressed(brief, hypotheses), {"channel": "distressed"})
+        ("(f) distressed, closed or for-sale companies", lambda: channels.distressed(brief, hypotheses),
+         {"channel": "distressed"})
         for _ in range(DISCOVERY["distressed_calls"] if looks_for(DISTRESSED) else 0)
+    ] + [
+        (f"({code}) untapped holders: {label}", lambda fn=fn: fn(brief, hypotheses), {"channel": channel})
+        for code, label, channel, fn in (("g", "signals", "signals", channels.signals),
+                                         ("h", "suppliers' customers", "suppliers", channels.suppliers),
+                                         ("i", "public records", "records", channels.records))
+        if untapped and DISCOVERY[f"{channel}_calls"]
     ]
     exclusions = brief.active("exclusions")
     hits, errors, partial = _run_channels(tasks, progress)
@@ -173,19 +187,27 @@ def discover(brief: Brief, hypotheses: list[HolderHypothesis], progress: Progres
                      exclusions=exclusions, errors=errors, partial=partial)
 
 
-def _good_seed(c: Candidate) -> bool:
-    """A well-scored by-product holder with evidence for the brief's languages or regions
+def seed_types(brief: Brief) -> list[str]:
+    """Untapped holders; collectors too when the buyer wants data recorded to order, since a
+    collector's competitors are other collectors."""
+    return SNOWBALL_SEED_TYPES + (["collector"] if CUSTOM_COLLECTION in brief.active("delivery") else [])
+
+
+def _good_seed(c: Candidate, types: list[str]) -> bool:
+    """A well-scored holder of a seed type with evidence for the brief's languages or regions
     (coverage None: the brief names neither)."""
     return (
-        c.holder_type in SNOWBALL_SEED_TYPES and not c.excluded and (c.fit or 0) >= SEED_FIT
+        c.holder_type in types and not c.excluded and (c.fit or 0) >= SEED_FIT
         and (c.scores.coverage is None or c.scores.coverage >= 3)
     )
 
 
-def pick_seeds(candidates: list[Candidate], explicit: list[tuple[str, str]] = ()) -> list[tuple[str, str]]:
+def pick_seeds(
+    candidates: list[Candidate], explicit: list[tuple[str, str]] = (), types: list[str] = SNOWBALL_SEED_TYPES
+) -> list[tuple[str, str]]:
     """Explicit seeds first, then good seeds by fit, best-corroborated first on ties."""
     good = sorted(
-        (c for c in candidates if _good_seed(c)),
+        (c for c in candidates if _good_seed(c, types)),
         key=lambda c: (c.fit, c.corroboration()), reverse=True,
     )
     seen = {normalize_domain(w) for _, w in explicit}

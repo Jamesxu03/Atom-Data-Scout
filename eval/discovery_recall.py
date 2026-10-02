@@ -29,6 +29,7 @@ SEEDS_CSV = Path(__file__).parent / "seed_companies.csv"
 class Seed(BaseModel):
     name: str
     website: str = ""
+    type: str = ""  # expected holder type: seller, collector, untapped, public, technology
     notes: str = ""
 
 
@@ -89,6 +90,13 @@ def report(seeds: list[Seed], d: Discovery) -> str:
     outcomes = Counter(_screen_outcome(m.candidate) for m in found)
     lines += ["", "Screen on found seeds (excluded or below threshold = wrongly dropped):"]
     lines += [f"  {k:16} {v}" for k, v in outcomes.most_common()]
+
+    typed = [m for m in found if m.seed.type]
+    if typed:
+        wrong = [m for m in typed if m.candidate.holder_type != m.seed.type]
+        lines += ["", f"Holder type matches the expected one for {len(typed) - len(wrong)}/{len(typed)} found seeds"]
+        lines += [f"  - {m.seed.name}: expected {m.seed.type}, screened {m.candidate.holder_type or 'unscreened'}"
+                  for m in wrong]
 
     ranks = sorted(m.rank for m in found)
     if ranks:

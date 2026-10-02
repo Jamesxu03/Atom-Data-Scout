@@ -27,14 +27,16 @@ def _candidates() -> list[Candidate]:
                          source_urls=[], **kw)
 
     return [
-        cand("EgoData", "egodata.example", reason="sells data", holder_type="vendor", data_owner="company",
+        cand("EgoData", "egodata.example", reason="sells data", holder_type="seller", data_owner="company",
+             collects_to_order=True,
              scores=Scores(data_match=5, coverage=5, licence=4), fit=4.8),
-        cand("Otter", "otter.ai", reason="AI notetaker", holder_type="by_product", data_owner="customers",
+        cand("Otter", "otter.ai", reason="AI notetaker", holder_type="untapped", data_owner="customers",
+             archetype="service", selling_status="open_to_it",
              languages=["English"], scores=Scores(data_match=5, coverage=5, licence=2, volume=5), fit=4.0,
              research=OTTER_RESEARCH,
              contacts=[Contact(email="privacy@otter.ai", role="Privacy / DPO inbox",
                                source_url="https://otter.ai/privacy", origin="website", verified=True)]),
-        cand("Lowfit", "lowfit.example", reason="adjacent", holder_type="by_product", data_owner="company",
+        cand("Lowfit", "lowfit.example", reason="adjacent", holder_type="untapped", data_owner="company",
              scores=Scores(data_match=2, coverage=1, licence=3), fit=1.9),
         cand("Down", "down.example", reason="homepage unreachable (ConnectError)"),
         cand("Payroll Co", "payroll.example", reason="HR", holder_type="unrelated", data_owner="unclear",
@@ -100,6 +102,10 @@ def test_brief_form_search_and_one_ranked_table(monkeypatch):
     assert list(table.value["Company"]) == ["EgoData", "Otter", "Down"]
     assert list(table.value["Fit"]) == ["4.8", "4.0", "?"]
     assert list(table.value["Licence"])[:2] == ["prior: likely sellable", "checked: Unclear"]
+    assert list(table.value["Type"])[:2] == ["Seller + collects",
+                                             "Untapped holder · Service by-product · open to selling"]
+    assert next(m for m in at.multiselect if m.label == "Why untapped holders have it").options == [
+        "Service by-product"]
     research = _button(at, "Research selected")
     assert research.label == "Research selected (0)" and research.disabled
     assert any("not legal advice" in c.value for c in at.caption)

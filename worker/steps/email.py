@@ -2,16 +2,18 @@
 no search. The draft is only shown and saved for the user to edit; nothing is sent."""
 
 from worker import llm
+from worker.archetypes import BY_KEY as ARCHETYPES
 from worker.brief_template import CATEGORIES, Brief
 from worker.config import MODEL
 from worker.schemas import Candidate, Contact, EmailDraft
 
 # What to ask for depends on what kind of holder the company is
 ASKS = {
-    "vendor": "whether the data is available, how much there is, its format, the price, and "
+    "seller": "whether the data is available, how much there is, its format, the price, and "
               "whether they can share a sample",
-    "by_product": "whether they would consider licensing the data with their customers' consent, "
-                  "and on what terms",
+    "collector": "whether they could record data to this specification (languages, speakers, volume), "
+                 "how long it would take, how they price it per unit, and who would own the result",
+    "untapped": "whether they would consider licensing data they already hold, and on what terms",
     "public": "the licence terms for using the data to train commercial models",
     "technology": "whether they hold recordings of their own (e.g. R&D or test data) that they "
                   "would consider licensing",
@@ -65,6 +67,21 @@ def _terms(brief: Brief) -> str:
     return "\n".join(lines) or "- Nothing specific yet."
 
 
+def _ask(c: Candidate) -> str:
+    """Untapped holders may not see their data as an asset: lead with the pitch for why they hold
+    it. Ones already open to licensing get a direct question about terms."""
+    ask = ASKS.get(c.holder_type, DEFAULT_ASK)
+    if c.holder_type != "untapped":
+        return ask
+    if c.selling_status == "open_to_it":
+        ask = "on what terms they would license data they hold (they appear open to it)"
+    elif c.archetype:
+        ask += f". Open with this angle, in your own words: {ARCHETYPES[c.archetype].pitch}"
+    if c.data_owner == "customers":
+        ask += ". Their customers own the data, so mention licensing with their customers' consent"
+    return ask
+
+
 def build_prompt(brief: Brief, c: Candidate, contact: Contact | None) -> str:
     if contact and contact.name:
         recipient = contact.name + (f" ({contact.role})" if contact.role else "")
@@ -72,7 +89,7 @@ def build_prompt(brief: Brief, c: Candidate, contact: Contact | None) -> str:
         recipient = (contact.role if contact and contact.role else "the team")
     return PROMPT.format(
         recipient=recipient, company=c.name, website=c.website, brief=brief.summary("SR"), terms=_terms(brief),
-        facts=_facts(c), ask=ASKS.get(c.holder_type, DEFAULT_ASK),
+        facts=_facts(c), ask=_ask(c),
     )
 
 
