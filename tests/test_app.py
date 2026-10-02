@@ -196,3 +196,25 @@ def test_language_and_volume_filters_and_price_and_age_columns():
     at.toggle(key=f"unknown-volume-{key}").set_value(True).run()
     assert list(table()["Company"]) == ["Otter"]
     assert not at.exception
+
+
+def test_tool_vendors_hidden_until_toggled():
+    cands = _candidates()
+    cands.append(Candidate(name="Gong", website="https://gong.io", domain="gong.io", channels=["product_search"],
+                           source_urls=[], reason="call recorder", holder_type="untapped", data_owner="customers",
+                           vendor=True, scores=Scores(data_match=5), fit=2.0))
+    s = sessions.create("Vendors", BRIEF)
+    s.discovery = Discovery(hits=[], candidates=cands)
+    s.meta.stage = "done"
+    sessions.save(s)
+
+    at = AppTest.from_file("../app.py", default_timeout=30).run()
+    next(b for b in at.sidebar.button if b.label.startswith("**Vendors**")).click().run()
+
+    def table():
+        return next(df for df in at.dataframe if "Fit" in df.value.columns).value
+
+    assert "Gong" not in list(table()["Company"])
+    at.toggle(key=f"vendors-{s.path.name}").set_value(True).run()  # shown despite fit below the minimum
+    assert table().set_index("Company").loc["Gong", "Type"] == "Untapped · tool vendor"
+    assert not at.exception

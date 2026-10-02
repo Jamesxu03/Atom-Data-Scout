@@ -21,7 +21,6 @@ from typing import Literal
 from urllib.parse import urlparse
 
 import httpx
-import trafilatura
 from pydantic import BaseModel, Field
 
 from worker import llm
@@ -33,7 +32,7 @@ from worker.config import (
     SCREEN_BATCH_SIZE,
     SCREEN_TEXT_CHARS,
 )
-from worker.crawl import fetch_homepage_text, fetch_html_quick, same_site
+from worker.crawl import extract_text, fetch_homepage_text, fetch_html_quick, same_site
 from worker.discovery.channels import GROUNDING_REDIRECT, mention_at
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
@@ -52,6 +51,7 @@ class ScreenItem(BaseModel):
     holder_type: Literal["ready", "untapped", "unrelated"]
     data_owner: DataOwner = Field(description="Who controls the data this company holds")
     collector: bool = Field(default=False, description="Ready source that only records to order")
+    vendor: bool = Field(default=False, description="Untapped only: makes the tool; its customers hold the data")
     exists: int | None = Field(default=None, description="Untapped only: 1 to 5, null if the pages don't say")
     allowed: int | None = Field(default=None, description="Untapped only: 1 to 5, null if the pages don't say")
     willing: int | None = Field(default=None, description="Untapped only: 1 to 5, null if the pages don't say")
@@ -114,6 +114,13 @@ data_owner:
 - "unclear": can't tell from these pages.
 
 collector: true for a ready source that records data to order and shows no existing data.
+
+vendor (untapped only): true if its product is the software, platform or hardware that
+records this kind of data (e.g. a meeting recorder or notetaker app, call-recording or
+conversation-intelligence software, a research or deposition platform, a dashcam maker), so
+its customers do the recording. False for organisations that record as part of their own
+work, even for clients: a focus-group facility, court-reporting firm, conference or
+earnings-call host, webcasting crew, broadcaster or transcription agency.
 
 For untapped holders only (null for others), answer three questions from these pages, each 1
 to 5, or null when the pages don't say:
@@ -189,7 +196,7 @@ def source_excerpt(c: Candidate, fetch: Callable[[str], str] = fetch_html_quick)
             if u.startswith("http") and GROUNDING_REDIRECT not in u and not _is_homepage(u, c.website)]
     for url in sorted(urls, key=lambda u: not same_site(u, c.website)):
         try:
-            text = trafilatura.extract(fetch(url)) or ""
+            text = extract_text(fetch(url))
         except Exception:  # dead, blocked or slow: try the next one
             continue
         if same_site(url, c.website):
@@ -262,6 +269,7 @@ def _apply(brief: Brief, c: Candidate, item: ScreenItem, home: str = "", src: st
         c.holder_type, c.excluded = None, True
     elif item.holder_type == "ready" and c.data_owner == "customers" and not c.collector:
         c.holder_type = "untapped"  # works on its clients' data: a service, not a data seller
+    c.vendor = item.vendor and c.holder_type == "untapped"
     if c.holder_type == "untapped":
         c.saleability = Saleability(**{q: Answer(score=getattr(item, q)) for q in ("exists", "allowed", "willing")},
                                     obstacle=item.obstacle, path=item.path)

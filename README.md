@@ -8,7 +8,7 @@ It tells apart two kinds of company:
 | Type | What it means | Judged by |
 |---|---|---|
 | **Ready source** | The data is already offered: sold or licensed, listed on a marketplace, published by a public body or repository, or recorded to order by a collector (shown as *Ready source · records to order*). | Its licence, against D1 |
-| **Untapped** | Holds the data but doesn't sell it: a service by-product, records kept by law, production leftovers, a closed company's archive, a device fleet, and so on. Tool and hardware makers count here too. | Saleability |
+| **Untapped** | Holds the data but doesn't sell it: a service by-product, records kept by law, production leftovers, a closed company's archive, a device fleet, and so on. Includes services that record for clients (focus-group facilities, court reporters, earnings-call hosts). | Saleability |
 
 **Saleability** answers three questions, each 1 to 5: does the data still **exist**, is selling
 it **allowed**, and is the holder **willing**. The grade is the lowest answer, because all three
@@ -17,6 +17,11 @@ must hold: *High* (4 to 5), *Medium* (3), *Low* (2) or *Not sellable* (1). The s
 the company's own policies, and an answer becomes *verified* once a quote is found on the page
 it cites. Each untapped holder also gets the main obstacle and how it could still be bought
 (e.g. "needs its customers' consent", "contact the administrators").
+
+**Tool vendors** are untapped companies whose product is the recording tool (meeting recorders,
+call-recording software, research platforms), so their customers do the recording and hold
+the data. They are shown as *Untapped · tool vendor*, hidden unless *Tool vendors* is on, capped
+at fit 2.0 and never used as snowball seeds: they lead to holders but aren't one.
 
 Companies unrelated to the brief are excluded rather than typed.
 
@@ -70,11 +75,12 @@ Initial brief → Refine (form with options) → Final brief
 
    Fit is capped at 2.0 when the evidence contradicts a must-have (the *Must-haves not met*
    column says which), at 2.0 for an untapped holder graded *Not sellable* and 3.0 for one
-   graded *Low*, and at 2.0 when research finds a ready source's data is for internal use only.
+   graded *Low*, at 2.0 for tool vendors, and at 2.0 when research finds a ready source's data is
+   for internal use only.
    Collectors are capped when C4 is a must-have without custom collection. The table shows
    the *Saleability* column and *Obstacle → how to buy*, and filters by minimum fit, type,
    languages (evidence for at least one picked) and minimum volume score; companies with
-   unknown volume stay unless *Known volume* is on.
+   unknown volume stay unless *Known volume* is on. Tool vendors appear only with *Tool vendors* on.
 4. **Research.** Tick rows in the table and click *Research selected*. For each company this
    deep-crawls the homepage, privacy policy and terms, then makes one Gemini + Google Search call
    for what data it holds, how much, its price, founding year and data period, and a check of
@@ -136,10 +142,11 @@ worker/
   crawl.py              homepage / privacy / terms / contact pages (httpx, playwright fallback)
   parallel.py           thread pool that keeps finished results if the quota runs out
 eval/
-  seed_companies.csv    known-good companies and their expected type, ready or untapped (from past
-                        meeting-audio searches)
-  discovery_recall.py   what share of them discovery found, via which channel, their rank, and
-                        whether the screen gave them the expected type
+  seed_companies.csv    known-good companies and their expected type: ready, untapped (a holder)
+                        or vendor (from past meeting-audio searches)
+  discovery_recall.py   what share of them discovery found, via which channel, their rank,
+                        whether the screen gave them the expected type, the share of tool vendors
+                        among untapped companies, and how many holders reach the top 25
 tests/                  pytest; Gemini is faked and network is blocked
 data/                   sessions and page cache (gitignored)
 ```

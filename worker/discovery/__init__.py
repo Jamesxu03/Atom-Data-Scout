@@ -168,7 +168,8 @@ def seed_types(brief: Brief) -> list[str]:
 
 
 def _seed_type(c: Candidate) -> str | None:
-    return "collector" if c.collector else c.holder_type
+    """Tool vendors never seed: "alternatives to" a vendor are more vendors."""
+    return "vendor" if c.vendor else "collector" if c.collector else c.holder_type
 
 
 def _good_seed(c: Candidate, types: list[str]) -> bool:

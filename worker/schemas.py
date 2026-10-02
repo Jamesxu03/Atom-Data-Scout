@@ -191,6 +191,7 @@ class Candidate(Facts):
     holder_type: HolderType | None = None
     data_owner: DataOwner | None = None
     collector: bool = False  # ready source that records to order, with no existing data
+    vendor: bool = False  # untapped: makes the tool or hardware; its customers record and hold the data
     saleability: Saleability | None = None  # untapped holders: the screen's initial answers
     languages: list[str] = Field(default=[], description="Buyer's languages it shows evidence of working in")
     regions: list[str] = Field(default=[], description="Buyer's regions it shows evidence of working in")

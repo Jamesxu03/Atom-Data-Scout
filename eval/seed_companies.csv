@@ -1,21 +1,31 @@
 name,website,type,notes
-Fireflies.ai,https://fireflies.ai,untapped,meeting audio (English): screened yes in 6 past runs
-Read AI,https://read.ai,untapped,meeting audio (English): screened yes in 6 past runs
-tl;dv,https://tldv.io,untapped,meeting audio (English): screened yes in 6 past runs
-Tactiq,https://tactiq.io,untapped,meeting audio (English): screened yes in 6 past runs
-MeetGeek,https://meetgeek.ai,untapped,meeting audio (English): screened yes in 6 past runs
-Gong,https://gong.io,untapped,meeting audio (English): screened yes in 5 past runs
-Avoma,https://avoma.com,untapped,meeting audio (English): screened yes in 5 past runs
-Jiminny,https://jiminny.com,untapped,meeting audio (English): screened yes in 5 past runs
-Otter.ai,https://otter.ai,untapped,meeting audio (English): screened yes in 5 past runs
-Fathom,https://fathom.video,untapped,meeting audio (English): screened yes in 5 past runs
-Fellow,https://fellow.ai,untapped,meeting audio (English): screened yes in 5 past runs
-Notta,https://notta.ai,untapped,meeting audio (English): screened yes in 4 past runs
-Granola,https://granola.ai,untapped,meeting audio (English): screened yes in 4 past runs
-Krisp,https://krisp.ai,untapped,meeting audio (English): screened yes in 4 past runs
+Fireflies.ai,https://fireflies.ai,vendor,meeting audio (English): tool vendor; screened yes in 6 past runs
+Read AI,https://read.ai,vendor,meeting audio (English): tool vendor; screened yes in 6 past runs
+tl;dv,https://tldv.io,vendor,meeting audio (English): tool vendor; screened yes in 6 past runs
+Tactiq,https://tactiq.io,vendor,meeting audio (English): tool vendor; screened yes in 6 past runs
+MeetGeek,https://meetgeek.ai,vendor,meeting audio (English): tool vendor; screened yes in 6 past runs
+Gong,https://gong.io,vendor,meeting audio (English): tool vendor; screened yes in 5 past runs
+Avoma,https://avoma.com,vendor,meeting audio (English): tool vendor; screened yes in 5 past runs
+Jiminny,https://jiminny.com,vendor,meeting audio (English): tool vendor; screened yes in 5 past runs
+Otter.ai,https://otter.ai,vendor,meeting audio (English): tool vendor; screened yes in 5 past runs
+Fathom,https://fathom.video,vendor,meeting audio (English): tool vendor; screened yes in 5 past runs
+Fellow,https://fellow.ai,vendor,meeting audio (English): tool vendor; screened yes in 5 past runs
+Notta,https://notta.ai,vendor,meeting audio (English): tool vendor; screened yes in 4 past runs
+Granola,https://granola.ai,vendor,meeting audio (English): tool vendor; screened yes in 4 past runs
+Krisp,https://krisp.ai,vendor,meeting audio (English): tool vendor; screened yes in 4 past runs
 Remote Legal,https://remotelegal.com,untapped,meeting audio (English): legal depositions; screened yes in 4 past runs
 Steno,https://steno.com,untapped,meeting audio (English): legal depositions; screened yes in 4 past runs
-Discuss,https://discuss.io,untapped,meeting audio (English): market-research interviews; screened yes in 4 past runs
+Discuss,https://discuss.io,vendor,meeting audio (English): market-research platform, tool vendor; screened yes in 4 past runs
 Nexdata,https://nexdata.ai,ready,meeting audio: data seller; screened yes in 4 past runs
 Defined.ai,https://defined.ai,ready,meeting audio: data seller; screened yes in 4 past runs
 Pangeanic,https://pangeanic.com,ready,speech data seller; screened yes in 3 past runs
+Veritext Legal Solutions,https://veritext.com,untapped,"meeting audio (English): legal depositions; proposed from past sessions, to confirm"
+Esquire Deposition Solutions,https://esquiresolutions.com,untapped,"meeting audio (English): legal depositions; proposed from past sessions, to confirm"
+Lexitas,https://lexitaslegal.com,untapped,"meeting audio (English): legal depositions; proposed from past sessions, to confirm"
+Amplify Research Partners,https://amplifyresearch.com,untapped,"meeting audio (English): focus-group facility; proposed from past sessions, to confirm"
+Civicom Marketing Research Services,https://civicommrs.com,untapped,"meeting audio (English): focus groups; proposed from past sessions, to confirm"
+Sago,https://sago.com,untapped,"meeting audio (English): focus groups; proposed from past sessions, to confirm"
+Chorus Call,https://choruscall.com,untapped,"meeting audio (English): earnings calls and investor events; proposed from past sessions, to confirm"
+ViaVid,https://viavid.com,untapped,"meeting audio (English): earnings calls; proposed from past sessions, to confirm"
+Swagit Productions,https://swagit.com,untapped,"meeting audio (English): council meeting recordings; proposed from past sessions, to confirm"
+Ubiqus,https://ubiqus.com,untapped,"meeting audio (English): meeting minutes and transcription; proposed from past sessions, to confirm"

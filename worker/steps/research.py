@@ -17,6 +17,7 @@ screening flag from public pages, not legal advice.
 """
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 
 from worker import llm
 from worker.brief_template import (
@@ -31,8 +32,8 @@ from worker.brief_template import (
     Brief,
     transfer_flags,
 )
-from worker.config import MODEL, RESEARCH_TEXT_CHARS
-from worker.crawl import CrawlResult, fetch_html, fetch_html_quick
+from worker.config import MODEL, PARALLEL_FETCHES, RESEARCH_TEXT_CHARS
+from worker.crawl import Browser, CrawlResult, fetch_html, fetch_html_quick
 from worker.discovery.channels import resolve_source
 from worker.schemas import (
     FACTS,
@@ -169,6 +170,8 @@ def _type_question(c: Candidate) -> str:
 
 def _holder(c: Candidate) -> str:
     if c.holder_type == "untapped":
+        if c.vendor:
+            return "tool vendor: makes the tool its customers record with, so its customers hold the data"
         return "untapped holder: has the data but doesn't sell it"
     if c.holder_type == "ready":
         return "ready source that records to order" if c.collector else "ready source: already offers the data"
@@ -187,24 +190,42 @@ def _same_url(a: str, b: str) -> bool:
     return a.rstrip("/").split("#")[0] == b.rstrip("/").split("#")[0]
 
 
+def _verified(ev: Evidence, crawl: CrawlResult, fetch: Callable[[str], str], min_words: int) -> Evidence | None:
+    """ev with its search redirect link resolved, if its quote is on the page it cites."""
+    url = resolve_source(ev.url)
+    crawled = next((p for p in crawl.pages() if _same_url(p.url, url)), None)
+    if crawled and quote_in_text(ev.quote, crawled.text, min_words):
+        ok = True
+    else:  # not crawled, or the crawl's main-text extraction dropped the passage
+        try:
+            ok = quote_on_page(ev.quote, fetch(url), min_words)
+        except Exception:  # unreachable = can't verify
+            ok = False
+    return ev.model_copy(update={"url": url}) if ok else None
+
+
 def verify_evidence(
     evidence: list[Evidence], crawl: CrawlResult, fetch: Callable[[str], str] = fetch_html_quick,
     min_words: int = MIN_QUOTE_WORDS,
 ) -> list[Evidence]:
     """Only quotes found on the page they cite, with search redirect links resolved."""
-    out = []
-    for ev in evidence:
-        url = resolve_source(ev.url)
-        crawled = next((p for p in crawl.pages() if _same_url(p.url, url)), None)
-        if crawled and quote_in_text(ev.quote, crawled.text, min_words):
-            ok = True
-        else:  # not crawled, or the crawl's main-text extraction dropped the passage
-            try:
-                ok = quote_on_page(ev.quote, fetch(url), min_words)
-            except Exception:  # unreachable = can't verify
-                ok = False
-        if ok:
-            out.append(ev.model_copy(update={"url": url}))
+    return _verify_all([(evidence, fetch, min_words)], crawl)[0]
+
+
+def _verify_all(
+    groups: list[tuple[list[Evidence], Callable[[str], str], int]], crawl: CrawlResult,
+) -> list[list[Evidence]]:
+    """verify_evidence for several lists at once: every quote is checked in parallel, since
+    each may need a redirect lookup and a page fetch."""
+    jobs = [(i, ev, fetch, min_words) for i, (evidence, fetch, min_words) in enumerate(groups) for ev in evidence]
+    out: list[list[Evidence]] = [[] for _ in groups]
+    if not jobs:
+        return out
+    with ThreadPoolExecutor(min(PARALLEL_FETCHES, len(jobs))) as pool:
+        checked = pool.map(lambda job: _verified(job[1], crawl, job[2], job[3]), jobs)
+        for (i, *_), ev in zip(jobs, checked):
+            if ev:
+                out[i].append(ev)
     return out
 
 
@@ -214,8 +235,18 @@ def verify_research(
 ) -> Research:
     """Keep only what verified quotes support. news_fetch (default: fetch) reads the pages
     saleability quotes cite, which are often news sites that need a browser."""
-    licence_evidence = verify_evidence(r.licence_evidence, crawl, fetch)
-    volume_evidence = verify_evidence(r.volume_evidence, crawl, fetch)
+    facts = {key: f for key in FACTS if (f := getattr(r, key)) and value_in_quote(f.value, f.quote)}
+    s = r.saleability
+    groups = [
+        (r.licence_evidence, fetch, MIN_QUOTE_WORDS),
+        (r.volume_evidence, fetch, MIN_QUOTE_WORDS),
+        *((ch.evidence, fetch, MIN_QUOTE_WORDS) for ch in r.checks),
+        *(([f], fetch, MIN_FACT_QUOTE_WORDS) for f in facts.values()),
+        *((getattr(s, q).evidence, news_fetch or fetch, MIN_QUOTE_WORDS) for q in SALEABILITY_QUESTIONS if s),
+    ]
+    verified = iter(_verify_all(groups, crawl))
+
+    licence_evidence, volume_evidence = next(verified), next(verified)
     update = {"licence_evidence": licence_evidence, "volume_evidence": volume_evidence}
     if not licence_evidence:
         update["licence"] = UNCLEAR
@@ -223,19 +254,18 @@ def verify_research(
         update |= {"volume_estimate": None, "volume_score": None}
     checks = []
     for ch in r.checks:
-        evidence = verify_evidence(ch.evidence, crawl, fetch)
+        evidence = next(verified)
         verdict = ch.verdict if evidence else "unclear"
         checks.append(Check(category=ch.category, verdict=verdict, finding=ch.finding, evidence=evidence))
     update["checks"] = list({ch.category: ch for ch in checks}.values())  # one per category
     for key in FACTS:
-        f = getattr(r, key)
-        kept = verify_evidence([f], crawl, fetch, MIN_FACT_QUOTE_WORDS) if f and value_in_quote(f.value, f.quote) else []
+        kept = next(verified) if key in facts else []
         update[key] = kept[0] if kept else None
-    if s := r.saleability:
+    if s:
         answers = {}
         for q in SALEABILITY_QUESTIONS:
             a = getattr(s, q)
-            evidence = verify_evidence(a.evidence, crawl, news_fetch or fetch)
+            evidence = next(verified)
             answers[q] = a.model_copy(update={"evidence": evidence, "verified": bool(evidence),
                                               "score": a.score if evidence else None})
         update["saleability"] = s.model_copy(update=answers)
@@ -243,8 +273,13 @@ def verify_research(
 
 
 def research(brief: Brief, c: Candidate, crawl: CrawlResult, fetch: Callable[[str], str] = fetch_html_quick,
-             news_fetch: Callable[[str], str] = fetch_html) -> Research:
+             news_fetch: Callable[[str], str] | None = None) -> Research:
+    """news_fetch defaults to fetch_html with one browser for all the news pages, launched only
+    if one needs rendering."""
     found = llm.ask(build_prompt(brief, c, crawl), Research, model=MODEL, use_search=True)
     if c.holder_type != "untapped":
         found = found.model_copy(update={"saleability": None})
-    return verify_research(found, crawl, fetch, news_fetch)
+    if news_fetch:
+        return verify_research(found, crawl, fetch, news_fetch)
+    with Browser() as browser:
+        return verify_research(found, crawl, fetch, lambda url: fetch_html(url, browser))

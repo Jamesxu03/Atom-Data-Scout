@@ -1,3 +1,5 @@
+import threading
+
 from tests.test_hypotheses import brief_with
 from worker.brief_template import COMMERCIAL, INTERNAL_ONLY, UNCLEAR, Pick
 from worker.crawl import CrawlResult, Page
@@ -46,6 +48,23 @@ def test_quote_from_search_is_checked_on_the_fetched_page():
     dead = Evidence(quote="Acme holds 10,000 hours of meetings", url="https://gone.example/")
     r = verify_research(_research([], [ok, wrong, dead], licence=UNCLEAR), _crawl(), pages.__getitem__)
     assert r.volume_evidence == [ok] and r.volume_score == 4
+
+
+def test_quotes_on_different_lists_are_fetched_in_parallel():
+    """A licence quote and a volume quote each wait for the other's fetch: checked one after
+    the other, the first would time out and be dropped."""
+    both_fetching = threading.Barrier(2, timeout=5)
+    pages = {"https://a.example": "<p>Acme sells licences to its call recordings archive.</p>",
+             "https://b.example": "<p>Acme has processed over 40 million customer calls.</p>"}
+
+    def fetch(url):
+        both_fetching.wait()
+        return pages[url]
+
+    lic = Evidence(quote="Acme sells licences to its call recordings archive", url="https://a.example")
+    vol = Evidence(quote="Acme has processed over 40 million customer calls", url="https://b.example")
+    r = verify_research(_research([lic], [vol], licence=COMMERCIAL), _crawl(), fetch)
+    assert (r.licence_evidence, r.volume_evidence) == ([lic], [vol])
 
 
 def test_quote_matching():

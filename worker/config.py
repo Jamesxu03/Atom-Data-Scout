@@ -12,6 +12,9 @@ HYPOTHESES_THINKING_LEVEL = "medium"
 PARALLEL_LLM_CALLS = 8
 PARALLEL_FETCHES = 16
 PARALLEL_CRAWLS = 3  # deep crawls may each start a headless browser
+# Companies researched at once. Each runs its research and contacts calls side by side, so this
+# keeps Gemini calls within PARALLEL_LLM_CALLS; crawls are still capped at PARALLEL_CRAWLS.
+PARALLEL_RESEARCH = PARALLEL_LLM_CALLS // 2
 
 # Discovery budget. Each unit below is one Gemini call with Google Search, so it costs money.
 DISCOVERY = {
@@ -28,8 +31,8 @@ DISCOVERY = {
 }
 
 # Snowball only from untapped holders (plus collectors when the buyer wants data recorded to
-# order) with fit >= SEED_FIT and evidence for the brief's languages or regions. Tool and
-# hardware makers rarely pass: their saleability grade (the data must exist) caps their fit.
+# order) with fit >= SEED_FIT and evidence for the brief's languages or regions. Never from tool
+# vendors: their competitors are more vendors, and their customers hold the data.
 SNOWBALL_SEED_TYPES = ["untapped"]
 
 # Relevance screen: companies per Flash call
@@ -52,3 +55,4 @@ MUST_HAVE_CAP = 2.0  # a must-have language or region with no evidence
 INTERNAL_ONLY_CAP = 2.0  # research found a ready source's data is for internal use only
 NOT_SELLABLE_CAP = 2.0  # untapped holder graded not sellable (one of the three questions scored 1)
 LOW_SALEABILITY_CAP = 3.0  # untapped holder graded low (lowest answer 2)
+VENDOR_CAP = 2.0  # tool vendor: a way to the holders (its customers), not a source itself

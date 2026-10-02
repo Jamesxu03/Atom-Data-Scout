@@ -8,6 +8,9 @@ The licence score depends on the holder type:
   selling it allowed, are they willing), because all three must hold for a purchase. A grade of
   1 or 2 also caps the fit.
 
+Tool vendors (untapped companies whose customers record and own the data) are capped below
+RELEVANT_FIT: they lead to holders but aren't one.
+
 How importance works (see worker/brief_template.py):
 - must: counted in the score, and the fit is capped when evidence contradicts it
 - nice: counted in the score
@@ -32,6 +35,7 @@ from worker.config import (
     MUST_HAVE_CAP,
     NOT_SELLABLE_CAP,
     RELEVANT_FIT,
+    VENDOR_CAP,
 )
 from worker.schemas import SALEABILITY_QUESTIONS, Candidate
 
@@ -147,6 +151,8 @@ def fit(c: Candidate, brief: Brief) -> float | None:
     value = sum(FIT_WEIGHTS[k] * v for k, v in known.items()) / sum(FIT_WEIGHTS[k] for k in known)
     if must_failures(c, brief):
         value = min(value, MUST_HAVE_CAP)
+    if c.vendor:
+        value = min(value, VENDOR_CAP)
     if c.holder_type == "untapped" and (g := grade(c, brief)) is not None and g <= 2:
         value = min(value, NOT_SELLABLE_CAP if g == 1 else LOW_SALEABILITY_CAP)
     if c.holder_type == "ready" and c.research and c.research.licence == INTERNAL_ONLY:

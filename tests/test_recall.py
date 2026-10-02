@@ -50,3 +50,13 @@ def test_empty_seed_file_is_friendly(tmp_path):
     p.write_text("name,website,notes\n")
     assert load_seeds(p) == []
     assert "No seeds" in report([], _discovery())
+
+
+def test_report_counts_vendors_and_holders_near_the_top():
+    d = _discovery()
+    otter = next(c for c in d.candidates if c.domain == "otter.ai")
+    otter.vendor = True
+    r = " ".join(report([Seed(name="Otter", website="otter.ai", type="vendor")], d).split())
+    assert "Untapped companies: 2, of which tool vendors: 1 (50%)" in r  # Acme is excluded
+    assert "Untapped holders (not vendors) in the top 25: 1" in r
+    assert "Holder type matches the expected one for 1/1" in r

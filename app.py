@@ -286,7 +286,7 @@ def fact_text(c: Candidate, key: str) -> str:
 def type_label(c: Candidate) -> str:
     if c.excluded and c.holder_type is None:
         return "Excluded"
-    return HOLDER_LABELS[c.holder_type] + (" · records to order" if c.collector else "")
+    return HOLDER_LABELS[c.holder_type] + (" · records to order" if c.collector else " · tool vendor" if c.vendor else "")
 
 
 def obstacle_text(c: Candidate) -> str:
@@ -380,13 +380,20 @@ def candidates_table(s: sessions.Session, path: str) -> None:
         help="Only companies with evidence for at least one of these") if s.brief.languages else []
     hide_unknown = right.toggle("Known volume", key=f"unknown-volume-{key}",
                                 help="Only companies whose volume is known. Most stay unknown until researched.")
+    show_vendors = right.toggle("Tool vendors", key=f"vendors-{key}",
+                                help="Makers of the tools holders record with (e.g. meeting recorders). Their "
+                                     "customers hold the data, so they are hidden and their fit is capped at 2.0.")
 
     def shown(c: Candidate) -> bool:
         if c.excluded:
             return show_excluded
+        if c.vendor:
+            if not show_vendors:
+                return False
+        elif c.fit is not None and c.fit < min_fit:
+            return False
         volume = c.scores.volume
         return (c.holder_type in types
-                and (c.fit is None or c.fit >= min_fit)
                 and (not languages or any(lang in c.languages for lang in languages))
                 and (volume >= min_volume if volume is not None else not hide_unknown))
 

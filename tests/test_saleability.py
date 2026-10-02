@@ -19,7 +19,7 @@ from worker.brief_template import (
     Brief,
     Pick,
 )
-from worker.config import LOW_SALEABILITY_CAP, NOT_SELLABLE_CAP
+from worker.config import LOW_SALEABILITY_CAP, NOT_SELLABLE_CAP, VENDOR_CAP
 from worker.crawl import CrawlResult, Page
 from worker.discovery import pick_seeds, seed_types
 from worker.schemas import Answer, Candidate, Evidence, Research, Saleability, Scores
@@ -142,6 +142,21 @@ def test_screen_types_and_initial_answers(fake_ask):
     assert (collector.holder_type, collector.collector) == ("ready", True)  # records new data: stays ready
     unrelated = _run(fake_ask, holder_type="unrelated", data_match=1)
     assert (unrelated.holder_type, unrelated.excluded) == (None, True)
+
+
+def test_tool_vendors_are_flagged_capped_and_never_seed(fake_ask):
+    vendor = _run(fake_ask, data_owner="customers", vendor=True, exists=5, allowed=4, willing=4)
+    assert (vendor.holder_type, vendor.vendor, vendor.fit) == ("untapped", True, VENDOR_CAP)
+    assert "meeting recorder or notetaker app" in fake_ask.calls[0].prompt
+    assert "court-reporting firm" in fake_ask.calls[0].prompt  # records for clients: not a vendor
+    assert not _run(fake_ask, holder_type="ready", vendor=True).vendor  # untapped only
+    holder = _run(fake_ask, data_owner="customers", exists=5, allowed=4, willing=4)
+    assert not holder.vendor and holder.fit > VENDOR_CAP
+
+    good = Scores(data_match=5, coverage=5)
+    cands = [_cand("v.com", holder_type="untapped", vendor=True, fit=4.5, scores=good),
+             _cand("h.com", holder_type="untapped", fit=4.0, scores=good)]
+    assert [w for _, w in pick_seeds(cands, types=seed_types(BRIEF))] == ["https://h.com"]
 
 
 def test_source_type_must_have_excludes_the_other_type(fake_ask):

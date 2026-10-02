@@ -12,13 +12,15 @@ so far is saved and the session is marked partial instead of being lost.
 
 import csv
 import io
+import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 
 from worker import sessions
 from worker.brief_template import Brief
-from worker.config import PARALLEL_CRAWLS
+from worker.config import PARALLEL_CRAWLS, PARALLEL_RESEARCH
 from worker.crawl import CrawlResult, crawl
 from worker.discovery import Discovery, check_sources, discover, pick_seeds, seed_types, snowball
 from worker.llm import QuotaExceeded
@@ -127,24 +129,28 @@ def research(
     targets = [c for c in session.discovery.candidates if c.domain in domains]
     session.meta.selected = list(dict.fromkeys(session.meta.selected + [c.domain for c in targets]))
 
+    crawl_slots = threading.Semaphore(PARALLEL_CRAWLS)
+
     def one(c: Candidate) -> None:
-        cr = crawler(c.website)
+        with crawl_slots:
+            cr = crawler(c.website)
         errors = [f"{c.domain}: crawl {e}" for e in cr.errors if e.startswith("homepage")]
-        progress(f"Researching {c.domain}")
-        c.research = research_company(brief, c, cr)
-        progress(f"Finding contacts: {c.domain}")
-        try:
-            c.contacts = find_contacts(c, cr)
-        except QuotaExceeded:
-            raise
-        except Exception as e:  # keep the research, which is still useful
-            errors.append(f"{c.domain}: contacts {type(e).__name__}: {str(e)[:200]}")
+        progress(f"Researching {c.domain}, finding contacts")
+        with ThreadPoolExecutor(1) as pool:  # contacts need only the crawl, so run beside research
+            contacts = pool.submit(find_contacts, c, cr)
+            c.research = research_company(brief, c, cr)
+            try:
+                c.contacts = contacts.result()
+            except QuotaExceeded:
+                raise
+            except Exception as e:  # keep the research, which is still useful
+                errors.append(f"{c.domain}: contacts {type(e).__name__}: {str(e)[:200]}")
         rescore(c, brief)
         session.meta.errors.extend(errors)
 
     with timer.step("Research", f"Researching {len(targets)} companies"):
         batch = run_parallel(
-            [(f"Deep crawl: {c.domain}", lambda c=c: one(c)) for c in targets], PARALLEL_CRAWLS, progress
+            [(f"Deep crawl: {c.domain}", lambda c=c: one(c)) for c in targets], PARALLEL_RESEARCH, progress
         )
     session.meta.errors.extend(batch.errors)
     if batch.quota_error:
@@ -183,7 +189,7 @@ def contacts_csv(candidates: list[Candidate]) -> str:
 def candidates_csv(candidates: list[Candidate], brief: Brief) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["name", "domain", "website", "fit", "holder_type", "collector", "data_owner", "data_match",
+    w.writerow(["name", "domain", "website", "fit", "holder_type", "collector", "vendor", "data_owner", "data_match",
                 "coverage", "volume", "licence", "licence_found", "saleability", *SALEABILITY_QUESTIONS, "obstacle",
                 "path", *FACTS, "must_haves_not_met", "languages", "regions", "reason", "excluded", "channels",
                 "source_verified", "source_urls"])
@@ -191,7 +197,7 @@ def candidates_csv(candidates: list[Candidate], brief: Brief) -> str:
         s, sale = c.scores, c.current_saleability()
         untapped = c.holder_type == "untapped"
         scores = answers(c, brief) if untapped else dict.fromkeys(SALEABILITY_QUESTIONS)
-        w.writerow([c.name, c.domain, c.website, c.fit, c.holder_type, c.collector, c.data_owner, s.data_match,
+        w.writerow([c.name, c.domain, c.website, c.fit, c.holder_type, c.collector, c.vendor, c.data_owner, s.data_match,
                     s.coverage, s.volume, s.licence, c.research.licence if c.research else None,
                     saleability_label(c, brief), *scores.values(), sale and sale.obstacle, sale and sale.path,
                     *((f.value if (f := c.fact(k)) else None) for k in FACTS),

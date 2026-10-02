@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from worker import crawl
@@ -118,3 +120,21 @@ def test_cache_expires_after_ttl(monkeypatch, tmp_path):
     os.utime(path, (week_ago, week_ago))
     assert crawl.fetch_html_quick("https://acme.example/privacy") == "<p>new policy</p>"
     assert not list(tmp_path.glob("*.tmp"))  # atomic writes leave no temp files behind
+
+
+def test_crawl_fetches_policy_pages_side_by_side(monkeypatch):
+    home = ('<a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/contact">Contact</a>'
+            + FULL)
+    all_fetching = threading.Barrier(3, timeout=5)  # privacy, terms and contact at once
+
+    def fetch(url):
+        if url == "https://acme.com":
+            return home
+        all_fetching.wait()
+        return FULL
+
+    monkeypatch.setattr(crawl, "_fetch_httpx", fetch)
+    result = crawl.crawl("acme.com")
+    assert result.errors == []
+    assert [p.url for p in result.pages()] == ["https://acme.com", "https://acme.com/privacy",
+                                               "https://acme.com/terms", "https://acme.com/contact"]
