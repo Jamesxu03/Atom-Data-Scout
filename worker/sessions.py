@@ -7,8 +7,9 @@ rerunning:
     hypotheses.json
     discovery.json   hits + candidates (scores, research, contacts and email on each)
 
-The timestamp prefix keeps folder names in creation order. Rerunning with an edited brief
-always creates a new session, so old results are never overwritten.
+The timestamp prefix keeps folder names in creation order. Rerunning or re-comparing
+(worker/compare.py) with an edited brief always creates a new session, so old results are
+never overwritten.
 """
 
 import json
@@ -32,6 +33,16 @@ SESSIONS_DIR = Path(__file__).resolve().parent.parent / "data" / "sessions"
 Stage = Literal["searching", "done", "partial", "failed"]
 
 
+class BriefChange(BaseModel):
+    """One line of what a compare session changed in the brief (worker/compare.py)."""
+
+    key: str  # a category key, or "description" / "notes"
+    label: str
+    before: str
+    after: str
+    exact: bool  # re-scored in Python; False: Gemini judged it against the old brief
+
+
 class SessionMeta(BaseModel):
     name: str
     created: datetime
@@ -41,6 +52,13 @@ class SessionMeta(BaseModel):
     selected: list[str] = []  # domains picked for research
     errors: list[str] = []
     relevant: int = 0  # for the session list, so it needn't load every discovery.json
+    # Compare sessions: another session's researched companies under an edited brief. Fits,
+    # changes and provisional reasons are counted from the original search, across re-comparisons.
+    parent: str | None = None  # folder name of the session compared from
+    parent_name: str = ""
+    parent_fit: dict[str, float | None] = {}  # domain -> fit in the original search
+    changes: list[BriefChange] = []
+    provisional: dict[str, list[str]] = {}  # domain -> why its fit rests on judgements of an older brief
 
 
 @dataclass

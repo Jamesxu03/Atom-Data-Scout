@@ -217,6 +217,8 @@ class Candidate(Facts):
     research: Research | None = None
     contacts: list[Contact] = []
     email: EmailDraft | None = None
+    killed: bool = False  # ruled out by the user after research: hidden and ranked last
+    kill_reason: str = ""
 
     @model_validator(mode="before")
     @classmethod

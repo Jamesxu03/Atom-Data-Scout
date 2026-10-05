@@ -6,8 +6,8 @@ from datetime import date
 from streamlit.testing.v1 import AppTest
 
 from tests.test_hypotheses import BRIEF, brief_with
-from worker import pipeline, sessions
-from worker.brief_template import UNCLEAR, BriefDraft, Pick
+from worker import compare, pipeline, sessions
+from worker.brief_template import COMMERCIAL, RESTRICTED, UNCLEAR, BriefDraft, Pick
 from worker.discovery import Discovery, Hit
 from worker.schemas import (
     Answer,
@@ -112,7 +112,7 @@ def test_brief_form_search_and_one_ranked_table(monkeypatch):
         ("With contacts", "1"),
     ]
     assert "Multi-speaker meeting audio" in at.info[0].value  # the saved brief's summary
-    (table,) = [df for df in at.dataframe if "Fit" in df.value.columns]
+    (table,) = [df for df in at.dataframe if "Reason" in df.value.columns]  # the candidates, not the comparison
     # one table by fit: below-threshold and excluded hidden, unknown fit last
     # fits are recomputed on load: Otter's consent obstacle doesn't cap it, and EgoData shows no
     # evidence for the brief's language
@@ -229,4 +229,104 @@ def test_tool_vendors_hidden_until_toggled():
     assert "Gong" not in list(table()["Company"])
     at.toggle(key=f"vendors-{s.path.name}").set_value(True).run()  # shown despite fit below the minimum
     assert table().set_index("Company").loc["Gong", "Type"] == "Untapped · tool vendor"
+    assert not at.exception
+
+
+def test_compare_tab_search_kill_edit_the_brief_and_save(monkeypatch):
+    def no_gemini(*a, **kw):
+        raise AssertionError("the Compare tab must not call Gemini")
+
+    monkeypatch.setattr("worker.llm.ask", no_gemini)
+    cands = _candidates()
+    cands[0].research = Research(data_held="licensed meeting corpus", licence=RESTRICTED, licence_evidence=[],
+                                 volume_estimate="3,000 hours", volume_score=4, volume_evidence=[])
+    s = sessions.create("Meeting audio", brief_with(licence=Pick(values=[COMMERCIAL], importance="must")))
+    s.discovery = Discovery(hits=[], candidates=cands)
+    s.meta.stage = "done"
+    sessions.save(s)
+    on_disk = (s.path / "discovery.json").read_text(), (s.path / "brief.json").read_text()
+    key = s.path.name
+
+    at = AppTest.from_file("../app.py", default_timeout=30).run()
+    next(b for b in at.sidebar.button if b.label.startswith("**Meeting audio**")).click().run()
+    assert [t.label for t in at.tabs] == ["Candidates", "Compare"]
+
+    def run():  # AppTest sends every tab back as unselected, so select Compare before each run
+        at.session_state[f"tab-{key}"] = "Compare"
+        at.run()
+
+    run()
+    assert not at.exception
+
+    def compared():
+        return next(df for df in at.dataframe if "Provisional because" in df.value.index
+                    or "Rank" in df.value.index).value
+
+    picker = at.multiselect(key=f"cmp-{key}-pick")
+    assert picker.value == ["otter.ai", "egodata.example"]  # researched only, best fit first
+    assert list(compared().columns) == ["Otter", "EgoData"]
+    assert compared().loc["Licence found", "EgoData"] == RESTRICTED
+    assert compared().loc["Must-haves not met", "EgoData"] == "Acceptable licence"
+    assert compared().loc["Fit", "EgoData"] == "2.0"  # research-only licence; D1 is commercial, must
+    assert any("No unsaved changes" in c.value for c in at.caption)
+
+    at.multiselect(key=f"cmp-{key}-pick").set_value([])
+    at.text_input(key=f"cmp-{key}-query").input("corpus")  # matches what research found it holds
+    run()
+    assert at.multiselect(key=f"cmp-{key}-pick").options == ["EgoData · Ready source"]
+    assert any(c.value.startswith("Pick companies above") for c in at.caption)
+    at.button(key=next(b.key for b in at.button if b.label == "Top 4")).click()
+    run()
+    assert at.multiselect(key=f"cmp-{key}-pick").value == ["otter.ai", "egodata.example"]
+
+    # relax the licence in the working brief: exact, so not provisional
+    form = f"cmp-{key}-form-0"
+    at.button_group(key=f"{form}-licence").set_value([COMMERCIAL, RESTRICTED])
+    run()
+    assert not at.exception
+    assert compared().loc["Fit", "EgoData"] != "2.0" and "*" not in compared().loc["Fit", "EgoData"]
+    assert compared().loc["Fit", "EgoData"] == "3.9" and compared().loc["Rank", "EgoData"] == "#2"
+    assert any("Unsaved changes" in w.value for w in at.warning)
+
+    # change the volume target: judged by Gemini, so EgoData's fit becomes provisional
+    at.number_input(key=f"{form}-volume-amount").set_value(50_000)
+    run()
+    assert compared().loc["Fit", "EgoData"].endswith("*")
+    assert compared().loc["Provisional because", "EgoData"] == "Volume was scored against the earlier target"
+    assert any("Judged against the old brief" in c.value for c in at.caption)
+
+    # remove a requirement, then kill Otter
+    at.button(key=f"{form}-languages-remove").click()
+    run()
+    assert not at.exception and at.session_state[f"cmp-{key}-version"] == 1
+    at.text_input(key=f"cmp-{key}-why-otter.ai").input("customers own the recordings")
+    run()
+    at.button(key=f"cmp-{key}-kill-ok-otter.ai").click()
+    run()
+    assert not at.exception
+    assert list(compared().columns) == ["EgoData"]
+    assert compared().loc["Rank", "EgoData"] == "#2 → #1"  # Otter is out of the running
+    assert any(m.value == "**Otter** — customers own the recordings" for m in at.markdown)
+    assert ((s.path / "discovery.json").read_text(), (s.path / "brief.json").read_text()) == on_disk  # preview only
+
+    at.text_input(key=f"cmp-{key}-name").input("Meeting audio, relaxed")
+    run()
+    at.button(key=next(b.key for b in at.button if b.label == "Save")).click()
+    run()
+    assert not at.exception
+    ((saved_path, meta),) = [(p, m) for p, m in sessions.list_all() if m.parent]
+    assert meta.name == "Meeting audio, relaxed" and meta.parent == key
+    saved = sessions.load(saved_path)
+    assert not saved.brief.is_set("languages") and saved.brief.pick("volume").amount == 50_000
+    assert compare.saved_kills(saved) == {"otter.ai": "customers own the recordings"}
+    assert set(saved.meta.provisional) == {"egodata.example", "otter.ai"}
+    assert ((s.path / "discovery.json").read_text(), (s.path / "brief.json").read_text()) == on_disk
+
+    # the new session opens on its Compare tab, with what changed from the original
+    assert at.session_state.session_path == str(saved_path)
+    assert [t.label for t in at.tabs] == ["Compare", "Candidates"]
+    assert [(m.label, m.value) for m in at.metric][2] == ("Killed", "1")
+    changes = next(df for df in at.dataframe if "Re-scored" in df.value.columns).value
+    assert list(changes["Category"]) == ["B2 Languages and dialects", "C1 Volume target", "D1 Acceptable licence"]
+    assert list(changes["Re-scored"]) == ["exactly", "judged against the old brief", "exactly"]
     assert not at.exception

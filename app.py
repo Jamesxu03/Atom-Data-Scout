@@ -1,7 +1,8 @@
 """Streamlit UI. Run: uv run streamlit run app.py
 
 Brief -> Refine (form) -> Save and search -> one list ranked by fit -> tick rows -> Research
-selected -> draft an email per company. Each search is a session folder (worker/sessions.py),
+selected -> Compare tab: search the researched companies, side by side, under a working brief
+and kills, saved as a new session -> draft an email per company. Each search is a session folder (worker/sessions.py),
 and every page reads it from disk, so any past session reopens without rerunning and a browser
 refresh loses nothing.
 
@@ -20,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from worker import pipeline, sessions
+from worker import compare, pipeline, sessions
 from worker.brief_template import (
     CATEGORIES,
     CODE_LABELS,
@@ -33,7 +34,7 @@ from worker.brief_template import (
     transfer_flags,
 )
 from worker.config import RELEVANT_FIT
-from worker.schemas import Candidate, Contact
+from worker.schemas import Candidate, CheckedCategory, Contact, Evidence
 from worker.scoring import answers, is_verified, must_failures, saleability_label
 from worker.steps import brief as brief_step
 from worker.steps import email as email_step
@@ -151,7 +152,8 @@ def sidebar() -> None:
             st.subheader("Past sessions")
         for p, meta in all_sessions:
             st.button(
-                f"**{meta.name}**  \n{meta.created:%d %b %Y, %H:%M} · {meta.relevant} relevant",
+                f"**{meta.name}**  \n{meta.created:%d %b %Y, %H:%M} · {meta.relevant} relevant"
+                + (" · compare" if meta.parent else ""),
                 key=f"open-{p.name}", on_click=open_session, args=(str(p),), width="stretch",
                 type="secondary" if str(p) != path else "primary",
             )
@@ -353,16 +355,54 @@ def session_page(path: str) -> None:
             st.dataframe(pd.DataFrame(s.meta.timings.items(), columns=["Step", "Seconds"]), hide_index=True)
 
     f = pipeline.funnel(s.discovery)
-    cols = st.columns(6)
-    cols[0].metric("Found", f.found, help="Raw hits across all discovery channels")
-    cols[1].metric("Unique", f.unique, help="Unique domains")
-    cols[2].metric("Screened", f.screened, help="Homepage read and scored")
-    cols[3].metric("Relevant", f.relevant, help=f"Fit of at least {RELEVANT_FIT}")
-    cols[4].metric("Researched", f.researched)
-    cols[5].metric("With contacts", f.with_contacts, help="Researched companies with a verified contact")
+    if s.meta.parent:  # a compare session holds researched companies only
+        lineage(s)
+        cols = st.columns(4)
+        cols[0].metric("Compared", f.researched)
+        cols[1].metric("Relevant", f.relevant, help=f"Fit of at least {RELEVANT_FIT}, not killed")
+        cols[2].metric("Killed", sum(c.killed for c in s.discovery.candidates))
+        cols[3].metric("With contacts", f.with_contacts, help="Researched companies with a verified contact")
+    else:
+        cols = st.columns(6)
+        cols[0].metric("Found", f.found, help="Raw hits across all discovery channels")
+        cols[1].metric("Unique", f.unique, help="Unique domains")
+        cols[2].metric("Screened", f.screened, help="Homepage read and scored")
+        cols[3].metric("Relevant", f.relevant, help=f"Fit of at least {RELEVANT_FIT}, not killed")
+        cols[4].metric("Researched", f.researched)
+        cols[5].metric("With contacts", f.with_contacts, help="Researched companies with a verified contact")
 
-    candidates_table(s, path)
-    researched(s, path, locked)
+    labels = ["Compare", "Candidates"] if s.meta.parent else ["Candidates", "Compare"]
+    tabs = dict(zip(labels, st.tabs(labels, key=f"tab-{Path(path).name}", on_change="rerun"), strict=True))
+    with tabs["Candidates"]:  # only the open tab runs
+        if tabs["Candidates"].open:
+            candidates_table(s, path)
+            researched(s, path, locked)
+    with tabs["Compare"]:
+        if tabs["Compare"].open:
+            compare_tab(s, path)
+
+
+def lineage(s: sessions.Session) -> None:
+    """Where a compare session came from, and what its brief changed."""
+    parent = sessions.SESSIONS_DIR / s.meta.parent
+    left, right = st.columns([4, 1], vertical_alignment="center")
+    left.caption(f"Researched companies of **{s.meta.parent_name}**, re-scored under this brief. "
+                 "Nothing was searched again.")
+    if parent.exists():
+        right.button("Open the original", on_click=open_session, args=(str(parent),), width="stretch")
+    if not s.meta.changes:
+        st.caption("The brief is unchanged.")
+        return
+    with st.expander(f"What changed in the brief ({len(s.meta.changes)})", expanded=True):
+        st.dataframe(pd.DataFrame([
+            {"Category": ch.label, "Before": ch.before or "—", "After": ch.after or "—",
+             "Re-scored": "exactly" if ch.exact else "judged against the old brief"}
+            for ch in s.meta.changes
+        ]), hide_index=True, width="stretch")
+        if not all(ch.exact for ch in s.meta.changes):
+            st.caption("Gemini judged these against the old brief, so fits that rest on them are provisional "
+                       "(marked *). Tick companies under Candidates and click *Research selected* for exact "
+                       "scores.")
 
 
 def candidates_table(s: sessions.Session, path: str) -> None:
@@ -374,7 +414,8 @@ def candidates_table(s: sessions.Session, path: str) -> None:
     present = list(dict.fromkeys(c.holder_type for c in s.discovery.candidates if not c.excluded))
     types = mid.multiselect("Type", present, default=present, format_func=HOLDER_LABELS.get, key=f"types-{key}")
     show_excluded = right.toggle("Show excluded", key=f"excluded-{key}",
-                                 help="Unrelated companies, dead websites, ones a must-have filter rules out, and "
+                                 help="Unrelated companies, dead websites, ones a must-have filter rules out, ones "
+                                      "you killed, and "
                                       "ones not screened because their site blocks automated access and no other "
                                       "page about them was found (the Reason column says why)")
     min_volume = left.select_slider(
@@ -391,7 +432,7 @@ def candidates_table(s: sessions.Session, path: str) -> None:
                                      "customers hold the data, so they are hidden and their fit is capped at 2.0.")
 
     def shown(c: Candidate) -> bool:
-        if c.excluded or c.fit is None:  # ruled out, or nothing to judge it by
+        if c.excluded or c.killed or c.fit is None:  # ruled out, or nothing to judge it by
             return show_excluded
         if c.vendor:
             if not show_vendors:
@@ -419,7 +460,7 @@ def candidates_table(s: sessions.Session, path: str) -> None:
                 "Volume": fmt(c.scores.volume),
                 **{label: fact_text(c, k) for k, label in FACT_LABELS.items()},
                 "Languages and regions": ", ".join(c.languages + c.regions),
-                "Reason": c.reason,
+                "Reason": kill_text(c) if c.killed else c.reason,
                 "Obstacle → how to buy": obstacle_text(c),
                 "Must-haves not met": ", ".join(CATEGORIES[k].label for k in must_failures(c, s.brief)),
                 "Website": c.website,
@@ -465,6 +506,334 @@ def candidates_table(s: sessions.Session, path: str) -> None:
                        "candidates.csv", "text/csv")
 
 
+def kill_text(c: Candidate) -> str:
+    return f"Killed: {c.kill_reason}" if c.kill_reason else "Killed"
+
+
+def change_text(now: float | None, before: float | None) -> str:
+    if now is None or before is None:
+        return ""
+    return "same" if abs(now - before) < 0.05 else f"{now - before:+.1f}"
+
+
+def rank_text(before: int | None, now: int | None) -> str:
+    if now is None:
+        return "killed"
+    return f"#{now}" if before in (None, now) else f"#{before} → #{now}"
+
+
+# --- compare ----------------------------------------------------------------------------------
+# The Compare tab works on a working brief and working kills, kept in st.session_state per
+# session. Everything shown is a preview re-scored in Python (worker/compare.py); nothing is
+# written until Save, which creates a new session and leaves this one as it is.
+
+MAX_COMPARED = 4
+NONE = "—"
+DIFFERENT = "background-color: rgba(255, 196, 0, 0.18)"
+PROVISIONAL = "color: #8a8a8a; font-style: italic"
+
+
+def _cmp(path: str, name: str) -> str:
+    return f"cmp-{Path(path).name}-{name}"
+
+
+def reset_working(path: str) -> None:
+    """Forget the working brief, kills and picks: back to what is saved."""
+    for k in [k for k in st.session_state if str(k).startswith(_cmp(path, ""))]:
+        del st.session_state[k]
+
+
+def _rebuild_editor(path: str, brief: Brief, shown: list[str]) -> None:
+    """New editor widgets, filled in from brief."""
+    st.session_state[_cmp(path, "snapshot")] = brief
+    st.session_state[_cmp(path, "shown")] = shown
+    st.session_state[_cmp(path, "version")] += 1
+
+
+def _remove_requirement(path: str, key: str) -> None:
+    brief = st.session_state[_cmp(path, "brief")]
+    picks = {k: p for k, p in brief.picks.items() if k != key}
+    _rebuild_editor(path, brief.model_copy(update={"picks": picks}),
+                    [k for k in st.session_state[_cmp(path, "shown")] if k != key])
+
+
+def _add_requirement(path: str, widget: str) -> None:
+    if key := st.session_state.get(widget):
+        _rebuild_editor(path, st.session_state[_cmp(path, "brief")], [*st.session_state[_cmp(path, "shown")], key])
+
+
+def _kill(path: str, domain: str) -> None:
+    reason = st.session_state.get(_cmp(path, f"why-{domain}"), "").strip()
+    st.session_state[_cmp(path, "kills")] = {**st.session_state[_cmp(path, "kills")], domain: reason}
+    pick = _cmp(path, "pick")
+    st.session_state[pick] = [d for d in st.session_state.get(pick, []) if d != domain]
+
+
+def _restore(path: str, domain: str) -> None:
+    st.session_state[_cmp(path, "kills")] = {d: why for d, why in st.session_state[_cmp(path, "kills")].items()
+                                             if d != domain}
+
+
+def _pick(path: str, domains: list[str]) -> None:
+    st.session_state[_cmp(path, "pick")] = domains
+
+
+def _save(path: str) -> None:
+    s = sessions.load(path)
+    p = compare.preview(s, st.session_state[_cmp(path, "brief")], st.session_state[_cmp(path, "kills")])
+    saved = compare.save(s, p, st.session_state.get(_cmp(path, "name"), "").strip() or s.meta.name)
+    reset_working(path)
+    open_session(str(saved.path))
+
+
+def compare_tab(s: sessions.Session, path: str) -> None:
+    if not any(c.research for c in s.discovery.candidates):
+        st.caption("Only researched companies are compared: research some under Candidates first.")
+        return
+    kills = st.session_state.setdefault(_cmp(path, "kills"), compare.saved_kills(s))
+    left, right = st.columns([1, 3], gap="large")
+    with left:
+        brief = brief_editor(s, path)
+    p = compare.preview(s, brief, kills)
+    with right:
+        save_bar(s, path, p)
+        domains = picker(p, path)
+        side_by_side(p, domains, path)
+        killed_list(p, path)
+        overview(p)
+        st.caption(f"Fit change and rank are against the original search. {LEGAL_NOTE}")
+
+
+def brief_editor(s: sessions.Session, path: str) -> Brief:
+    """The working brief: edit, remove or add requirements. Returns it, and keeps it in state."""
+    snapshot = st.session_state.setdefault(_cmp(path, "snapshot"), s.brief)
+    shown = st.session_state.setdefault(_cmp(path, "shown"), [k for k in CATEGORIES if s.brief.is_set(k)])
+    fid = f"{_cmp(path, 'form')}-{st.session_state.setdefault(_cmp(path, 'version'), 0)}"
+    st.markdown("**Working brief**")
+    st.caption("Edit, remove or add requirements: the comparison follows. Nothing is saved until you click Save.")
+    with st.expander("What data and notes"):
+        description = st.text_input("What data, in a few words", snapshot.description, key=f"{fid}-description")
+        notes = st.text_area("Notes", snapshot.notes, key=f"{fid}-notes")
+    picks: dict[str, Pick] = {}
+    flags = {}
+    for key in (k for k in CATEGORIES if k in shown):
+        with st.container(border=True):
+            picks[key] = category_input(CATEGORIES[key], snapshot, fid, picks)
+            flags[key] = st.empty()
+            st.button("Remove", key=f"{fid}-{key}-remove", icon=":material/close:", type="tertiary",
+                      on_click=_remove_requirement, args=(path, key))
+    st.selectbox("Add a requirement", [k for k in CATEGORIES if k not in shown], index=None, key=f"{fid}-add",
+                 format_func=lambda k: f"{CATEGORIES[k].code} {CATEGORIES[k].label}", placeholder="Pick a category",
+                 on_change=_add_requirement, args=(path, f"{fid}-add"))
+    brief = Brief(description=description.strip() or snapshot.description, notes=notes,
+                  picks={k: p for k, p in picks.items() if p.values or p.amount is not None or p.amount_to is not None})
+    st.session_state[_cmp(path, "brief")] = brief
+    for ch in compare.changes(s.brief, brief):
+        if ch.key in flags and not ch.exact:
+            flags[ch.key].caption("Judged against the old brief: fits that rest on it are provisional (*)")
+    return brief
+
+
+def save_bar(s: sessions.Session, path: str, p: compare.Preview) -> None:
+    if not p.unsaved:
+        st.caption("No unsaved changes. Edit the brief or kill companies to compare them another way.")
+        return
+    with st.container(border=True):
+        st.warning("**Unsaved changes.** This is a preview: Save keeps it as a new session, and this session stays "
+                   "as it is.")
+        name, save, reset = st.columns([3, 1, 1], vertical_alignment="bottom")
+        name.text_input("Save as", s.meta.name if s.meta.parent else f"{s.meta.name} · compare",
+                        key=_cmp(path, "name"))
+        save.button("Save", type="primary", on_click=_save, args=(path,), width="stretch")
+        reset.button("Reset", on_click=reset_working, args=(path,), width="stretch",
+                     help="Back to this session's brief and kills")
+
+
+def pick_label(c: Candidate) -> str:
+    return " · ".join(x for x in (c.name, type_label(c), ", ".join(c.regions)) if x)
+
+
+def picker(p: compare.Preview, path: str) -> list[str]:
+    """Search the researched companies and pick up to MAX_COMPARED. Values are domains, so a
+    pick survives re-scoring."""
+    alive = {c.domain: c for c in p.candidates if not c.killed}
+    key = _cmp(path, "pick")
+    chosen = [d for d in st.session_state.get(key, list(alive)[:MAX_COMPARED]) if d in alive]
+    st.session_state[key] = chosen
+    search, top = st.columns([4, 1], vertical_alignment="bottom")
+    query = search.text_input("Search researched companies", key=_cmp(path, "query"),
+                              placeholder="Name, type, region, language or what data they hold")
+    top.button(f"Top {MAX_COMPARED}", on_click=_pick, args=(path, list(alive)[:MAX_COMPARED]), width="stretch",
+               help="The best fits under the working brief")
+    found = [d for d, c in alive.items() if d not in chosen and compare.matches(c, query)]
+    picked = st.multiselect(f"Compare (up to {MAX_COMPARED})", chosen + found, key=key, max_selections=MAX_COMPARED,
+                            format_func=lambda d: pick_label(alive[d]), placeholder="Pick companies to compare")
+    if query and not found:
+        st.caption("No other researched company matches.")
+    return picked
+
+
+def answer_text(c: Candidate, q: str, brief: Brief) -> str:
+    if c.holder_type != "untapped":
+        return NONE
+    a, score = (s := c.current_saleability()) and getattr(s, q), answers(c, brief)[q]
+    if score is None:
+        return "?"
+    return f"{score}/5 ({'verified' if a and a.verified else 'initial'})"
+
+
+def verdict_text(c: Candidate, key: str) -> str:
+    ch = next((ch for ch in c.research.checks if ch.category == key), None)
+    return f"{VERDICT_ICONS[ch.verdict]} {ch.verdict}" if ch else NONE
+
+
+def compared_rows(cands: list[Candidate], p: compare.Preview) -> dict[str, list[str]]:
+    """Short values, one row per field: these are compared and highlighted."""
+    checks = [k for k in CheckedCategory.__args__ if any(ch.category == k for c in cands for ch in c.research.checks)]
+    rows = {
+        "Fit": [fmt(c.fit) + ("*" if c.domain in p.provisional else "") for c in cands],
+        "Provisional because": ["; ".join(p.provisional.get(c.domain, [])) or NONE for c in cands],
+        "Fit change": [change_text(c.fit, p.fit_before.get(c.domain)) or NONE for c in cands],
+        "Rank": [rank_text(p.rank_before.get(c.domain), p.rank_now.get(c.domain)) for c in cands],
+        "Type": [type_label(c) for c in cands],
+        "Saleability": [saleability_label(c, p.brief) for c in cands],
+        "Licence found": [c.research.licence if c.holder_type == "ready" else NONE for c in cands],
+        **{label: [answer_text(c, q, p.brief) for c in cands] for q, label in QUESTION_LABELS.items()},
+        **{CATEGORIES[k].label: [verdict_text(c, k) for c in cands] for k in checks},
+        "Must-haves not met": [", ".join(CATEGORIES[k].label for k in must_failures(c, p.brief)) or NONE
+                               for c in cands],
+        "Languages": [", ".join(c.languages) or NONE for c in cands],
+        "Regions": [", ".join(c.regions) or NONE for c in cands],
+        "Verified contacts": [str(sum(k.verified for k in c.contacts)) for c in cands],
+        "Email": ["drafted" if c.email else NONE for c in cands],
+    }
+    return {k: v for k, v in rows.items() if any(x != NONE for x in v)}
+
+
+def text_rows(cands: list[Candidate]) -> dict[str, list[str]]:
+    """Free text: rarely the same twice, so always shown."""
+    checks = [k for k in CheckedCategory.__args__ if any(ch.category == k for c in cands for ch in c.research.checks)]
+    rows = {
+        "Data held": [c.research.data_held for c in cands],
+        "Volume found": [c.research.volume_estimate or "?" for c in cands],
+        **{label: [fact_text(c, k) for c in cands] for k, label in FACT_LABELS.items()},
+        **{f"{CATEGORIES[k].label}: finding": [
+            next((ch.finding for ch in c.research.checks if ch.category == k), NONE) for c in cands] for k in checks},
+        "Obstacle → how to buy": [obstacle_text(c) or NONE for c in cands],
+        "Why it was found": [c.reason or NONE for c in cands],
+    }
+    return {k: v for k, v in rows.items() if any(x != NONE for x in v)}
+
+
+def quotes(c: Candidate) -> list[tuple[str, Evidence]]:
+    r, s = c.research, c.current_saleability()
+    out = [("Licence", ev) for ev in r.licence_evidence]
+    out += [(label, ev) for q, label in QUESTION_LABELS.items() for ev in ((s and getattr(s, q).evidence) or [])]
+    out += [("Volume", ev) for ev in r.volume_evidence]
+    out += [(label, f) for k, label in FACT_LABELS.items() if (f := c.fact(k))]
+    out += [(CATEGORIES[ch.category].label, ev) for ch in r.checks for ev in ch.evidence]
+    return out
+
+
+def _table(rows: dict[str, list[str]], names: list[str], provisional: list[bool] = ()) -> None:
+    """Fields down, companies across. Rows where companies differ are highlighted; a
+    provisional fit is greyed."""
+    df = pd.DataFrame.from_dict(rows, orient="index", columns=names)
+
+    def style(row: pd.Series) -> list[str]:
+        differ = len(names) > 1 and row.nunique() > 1
+        out = [DIFFERENT if differ else "" for _ in row]
+        if row.name == "Fit":
+            out = [f"{o};{PROVISIONAL}" if prov else o for o, prov in zip(out, provisional, strict=True)]
+        return out
+
+    st.dataframe(df.style.apply(style, axis=1), width="stretch")
+
+
+def side_by_side(p: compare.Preview, domains: list[str], path: str) -> None:
+    cands = [p.get(d) for d in domains]
+    if not cands:
+        st.caption("Pick companies above to compare them side by side.")
+        return
+    for col, c in zip(st.columns(len(cands)), cands, strict=True):
+        with col:
+            st.markdown(f"**{c.name}**  \n[{c.domain}]({c.website})")
+            kill, details = st.columns(2)
+            with kill.popover("Kill", icon=":material/block:", width="stretch", key=_cmp(path, f"kill-{c.domain}")):
+                st.text_input("Why", key=_cmp(path, f"why-{c.domain}"), placeholder="e.g. licence too strict")
+                st.button("Kill", key=_cmp(path, f"kill-ok-{c.domain}"), type="primary", on_click=_kill,
+                          args=(path, c.domain), help="Until you save, only this preview changes")
+            if details.button("Details", key=_cmp(path, f"details-{c.domain}"), width="stretch"):
+                details_dialog(c, p.brief, path)
+    names = [c.name if [x.name for x in cands].count(c.name) == 1 else f"{c.name} ({c.domain})" for c in cands]
+    only_diff = st.toggle("Only differences", key=_cmp(path, "diff"), disabled=len(cands) < 2,
+                          help="Hides rows where every company has the same value. Text rows always show.")
+    rows = compared_rows(cands, p)
+    if only_diff and len(cands) > 1:
+        rows = {k: v for k, v in rows.items() if len(set(v)) > 1 or k == "Fit"}
+    _table(rows, names, [c.domain in p.provisional for c in cands])
+    if any(c.domain in p.provisional for c in cands):
+        st.caption("\\* Provisional: this fit rests on something Gemini judged against an older brief (see "
+                   "*Provisional because*). Research the company again for an exact score.")
+    with st.expander("Text and sources"):
+        _table(text_rows(cands), names)
+        for col, c in zip(st.columns(len(cands)), cands, strict=True):
+            with col:
+                st.markdown(f"**{c.name}**")
+                for what, ev in (found := quotes(c)):
+                    st.markdown(f"*{what}:* {ev.quote}\n\n[{ev.url}]({ev.url})")
+                if not found:
+                    st.caption("No verified quotes.")
+
+
+@st.dialog("Research details", width="large")
+def details_dialog(c: Candidate, brief: Brief, path: str) -> None:
+    st.subheader(c.name)
+    st.caption("Scored under the working brief.")
+    research_details(c, brief)
+    contacts_section(c, path)
+
+
+def killed_list(p: compare.Preview, path: str) -> None:
+    dead = [c for c in p.candidates if c.killed]
+    if not dead:
+        return
+    with st.expander(f"Killed ({len(dead)})"):
+        for c in dead:
+            text, button = st.columns([4, 1], vertical_alignment="center")
+            text.markdown(f"**{c.name}** — {c.kill_reason or 'no reason given'}")
+            excluded = c.kill_reason == compare.EXCLUDED
+            button.button("Restore", key=_cmp(path, f"restore-{c.domain}"), on_click=_restore, args=(path, c.domain),
+                          disabled=excluded, width="stretch",
+                          help="Remove it from the brief's exclusions to restore it" if excluded else None)
+
+
+def overview(p: compare.Preview) -> None:
+    with st.expander(f"All researched ({len(p.candidates)})"):
+        checks = [k for k in CheckedCategory.__args__
+                  if any(ch.category == k for c in p.candidates for ch in c.research.checks)]
+        st.dataframe(pd.DataFrame([
+            {
+                "Rank": rank_text(p.rank_before.get(c.domain), p.rank_now.get(c.domain)),
+                "Fit": fmt(c.fit) + ("*" if c.domain in p.provisional else ""),
+                "Fit change": change_text(c.fit, p.fit_before.get(c.domain)),
+                "Company": c.name,
+                "Type": type_label(c),
+                "Saleability": saleability_label(c, p.brief),
+                "Must-haves not met": ", ".join(CATEGORIES[k].label for k in must_failures(c, p.brief)),
+                "Volume found": c.research.volume_estimate or "?",
+                "Price": fact_text(c, "price"),
+                "Data years": fact_text(c, "data_period"),
+                **{CATEGORIES[k].label: verdict_text(c, k) for k in checks},
+                "Obstacle → how to buy": obstacle_text(c),
+                "Verified contacts": sum(k.verified for k in c.contacts),
+                "Email": "drafted" if c.email else "",
+                "Killed": kill_text(c) if c.killed else "",
+            }
+            for c in p.candidates
+        ]), hide_index=True, width="stretch")
+
+
 def _update_candidate(path: str, domain: str, change: Callable[[Candidate], None]) -> None:
     s = sessions.load(path)
     change(next(c for c in s.discovery.candidates if c.domain == domain))
@@ -477,38 +846,44 @@ def researched(s: sessions.Session, path: str, locked: bool) -> None:
         return
     st.subheader("Researched")
     for c in done:
-        r = c.research
-        with st.expander(f"{c.name} — fit {fmt(c.fit)} — {saleability_label(c, s.brief)}"):
-            if c.holder_type == "untapped":
-                saleability_section(c, s.brief)
-            else:
-                accepted = s.brief.active("licence")
-                fits = f" (you accept: {', '.join(accepted)})" if accepted else ""
-                st.markdown(f"**Licence:** {r.licence}{fits}")
-                for ev in r.licence_evidence:
-                    st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
-                if not r.licence_evidence:
-                    st.caption("No verified quote.")
-            st.markdown(f"**Volume:** {r.volume_estimate or 'unknown'}")
-            for ev in r.volume_evidence:
-                st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
-            for k, label in FACT_LABELS.items():
-                if f := c.fact(k):
-                    st.markdown(f"**{label}:** {fact_text(c, k)}\n\n> {f.quote}\n\n[{f.url}]({f.url})")
-            st.markdown(f"**Data held:** {r.data_held}")
-            if r.checks:
-                st.markdown("**Checks against the brief**")
-            for ch in r.checks:
-                st.markdown(f"{VERDICT_ICONS[ch.verdict]} **{CATEGORIES[ch.category].label}** "
-                            f"({s.brief.value_text(ch.category)}): {ch.finding}")
-                for ev in ch.evidence:
-                    st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
-            st.caption(LEGAL_NOTE)
+        killed = f" — {kill_text(c)}" if c.killed else ""
+        with st.expander(f"{c.name} — fit {fmt(c.fit)} — {saleability_label(c, s.brief)}{killed}"):
+            research_details(c, s.brief)
             contacts_section(c, path)
             email_section(s, c, path, locked)
     with_contacts = [c for c in done if c.contacts]
     if with_contacts:
         st.download_button("Download contacts CSV", pipeline.contacts_csv(with_contacts), "contacts.csv", "text/csv")
+
+
+def research_details(c: Candidate, brief: Brief) -> None:
+    """Licence or saleability, volume, stated facts, data held and checks, each with its quotes."""
+    r = c.research
+    if c.holder_type == "untapped":
+        saleability_section(c, brief)
+    else:
+        accepted = brief.active("licence")
+        fits = f" (you accept: {', '.join(accepted)})" if accepted else ""
+        st.markdown(f"**Licence:** {r.licence}{fits}")
+        for ev in r.licence_evidence:
+            st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
+        if not r.licence_evidence:
+            st.caption("No verified quote.")
+    st.markdown(f"**Volume:** {r.volume_estimate or 'unknown'}")
+    for ev in r.volume_evidence:
+        st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
+    for k, label in FACT_LABELS.items():
+        if f := c.fact(k):
+            st.markdown(f"**{label}:** {fact_text(c, k)}\n\n> {f.quote}\n\n[{f.url}]({f.url})")
+    st.markdown(f"**Data held:** {r.data_held}")
+    if r.checks:
+        st.markdown("**Checks against the brief**")
+    for ch in r.checks:
+        st.markdown(f"{VERDICT_ICONS[ch.verdict]} **{CATEGORIES[ch.category].label}** "
+                    f"({brief.value_text(ch.category)}): {ch.finding}")
+        for ev in ch.evidence:
+            st.markdown(f"> {ev.quote}\n\n[{ev.url}]({ev.url})")
+    st.caption(LEGAL_NOTE)
 
 
 def saleability_section(c: Candidate, brief: Brief) -> None:

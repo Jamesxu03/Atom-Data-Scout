@@ -225,13 +225,13 @@ def rescore(c: Candidate, brief: Brief, volume_signal: int | None = None) -> Non
 
 
 def is_relevant(c: Candidate) -> bool:
-    return not c.excluded and c.fit is not None and c.fit >= RELEVANT_FIT
+    return not c.excluded and not c.killed and c.fit is not None and c.fit >= RELEVANT_FIT
 
 
 def rank(candidates: list[Candidate]) -> list[Candidate]:
-    """By fit; unknown fit (e.g. unreachable homepage) and excluded companies last.
+    """By fit; unknown fit (e.g. unreachable homepage), killed and excluded companies last.
     Corroboration (more channels, hypotheses and sources) only breaks ties: it favours famous
     companies, which are the least likely to sell their customers' data."""
     return sorted(candidates, key=lambda c: (
-        c.excluded, c.fit is None, -(c.fit or 0), tuple(-int(x) for x in c.corroboration()),
+        c.excluded, c.killed, c.fit is None, -(c.fit or 0), tuple(-int(x) for x in c.corroboration()),
     ))

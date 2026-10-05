@@ -33,6 +33,7 @@ Companies unrelated to the brief are excluded rather than typed.
 Initial brief → Refine (form with options) → Final brief
   → Search: hypotheses → discovery (9 channels) → source checks → screen → one list ranked by fit
   → You tick promising rows → Research selected: licence or saleability, volume, contacts
+  → Compare: search the researched companies, side by side; edit the brief, kill, save
   → Draft an outreach email per company
 ```
 
@@ -112,7 +113,47 @@ Initial brief → Refine (form with options) → Final brief
    no quote becomes *Unclear*, and a saleability answer with no quote falls back to the screen's
    initial one. The scores are then recomputed and the list is ranked again. Licence and
    saleability are screening flags from public pages, not legal advice.
-5. **Email.** In each researched company's panel, pick a contact (verified ones first) and click
+5. **Compare.** A session has two tabs, *Candidates* (the list above and the research panels) and
+   *Compare*, which works on the researched companies only:
+   - **Search and pick.** Search by name, type, region, language or what research found they
+     hold, and pick up to four (*Top 4* picks the best fits).
+   - **Side by side.** One column per company: fit, why it is provisional, fit change and rank
+     change against the original search, type, saleability, licence found or the three
+     saleability answers, each research check, must-haves not met, languages, regions,
+     verified contacts and email. Rows where the companies differ are highlighted, and *Only
+     differences* hides the rest. Free text (data held, volume found, price, data years,
+     findings, obstacle) and the quotes with their links sit under *Text and sources*.
+     *Details* opens a company's full research.
+   - **Working brief.** On the left: edit, remove or add requirements, and the comparison
+     re-scores as you go. **Kill** a company (with a reason) from its column; killed ones are
+     listed below with *Restore*, and *All researched* shows every researched company.
+
+   Everything in the tab is a preview: it is re-scored in Python only (`worker/compare.py`), with
+   no Gemini call, and nothing is written. A banner shows unsaved changes; *Save* keeps the
+   working brief and kills as a new session (opened on its *Compare* tab, with what changed from
+   the original), *Reset* goes back. The session being compared is never changed. Killed
+   companies are ranked last and not counted as relevant; in the candidates list they show
+   with *Show excluded*.
+
+   Which changes re-score exactly:
+
+   | Change | Re-scored |
+   |---|---|
+   | D1 licence, D3 customers' data, C3 recorded to order, E1 source types (as a must-have it caps rather than hides) | exactly: research stored the label or flag, and the rule is in Python |
+   | E2 exclusions | exactly: matching companies are killed, and lifted when the exclusion is removed |
+   | Must turned off, a category removed | exactly: it no longer counts |
+   | Languages or regions removed | exactly: the rest keep their evidence |
+   | Must turned on for C1 volume, C2 recency, D2 permitted use or F1 deal terms | exactly: research checks them whatever their importance |
+   | What data, notes, A1 to A3 and the modality add-ons | provisional: data match was screened against the old ones |
+   | C1 volume target | provisional: the volume score becomes unknown |
+   | C2, D2 or F1 values | provisional: their research checks become *unclear* |
+   | Languages or regions added | provisional: they weren't looked for |
+   | Must turned on for a category only the screen judges | provisional: the screen only checked the must-haves it had |
+
+   A provisional fit is greyed and marked `*`, with the reason in the row under it, for the
+   companies it affects only. In the saved session the reasons stay; tick the companies under
+   *Candidates* and click *Research selected* for exact scores.
+6. **Email.** In each researched company's panel, pick a contact (verified ones first) and click
    *Draft email*. The email asks about the deal terms that matter most (D2 permitted use, F1
    deal terms) and never states a price or the budget. The question depends on the type:
    - ready sources are asked about availability and price, or the licence terms if the data
@@ -124,7 +165,7 @@ Initial brief → Refine (form with options) → Final brief
 
    Edit the subject and body (edits are saved), then download the draft. Nothing is sent.
 
-Every search is a **session** saved under `data/sessions/<time>-<name>/`
+Every search (and every re-comparison) is a **session** saved under `data/sessions/<time>-<name>/`
 (`session.json`, `brief.json`, `hypotheses.json`, `discovery.json`). The sidebar reopens any
 past session from disk without rerunning. *New session from this brief* opens the form
 prefilled with the brief, so briefs can be reused as templates. Rerunning always creates a new
@@ -144,6 +185,7 @@ worker/
   llm.py                ask(): structured output, retries, optional Google Search
   sessions.py           create, list, save and load session folders
   pipeline.py           search() and research(); funnel and CSV exports
+  compare.py            preview researched companies under a working brief and kills; save
   scoring.py            coverage, licence and saleability grade, caps, fit, ranking
   verify.py             is an email / phone / name / quote really on the page it cites?
   discovery/            the nine search channels and snowball; dedupe by domain, skip exclusions

@@ -192,7 +192,7 @@ def candidates_csv(candidates: list[Candidate], brief: Brief) -> str:
     w.writerow(["name", "domain", "website", "fit", "holder_type", "collector", "vendor", "data_owner", "data_match",
                 "coverage", "volume", "licence", "licence_found", "saleability", *SALEABILITY_QUESTIONS, "obstacle",
                 "path", *FACTS, "must_haves_not_met", "languages", "regions", "reason", "excluded", "channels",
-                "source_verified", "source_urls"])
+                "source_verified", "source_urls", "killed", "kill_reason"])
     for c in candidates:
         s, sale = c.scores, c.current_saleability()
         untapped = c.holder_type == "untapped"
@@ -203,5 +203,5 @@ def candidates_csv(candidates: list[Candidate], brief: Brief) -> str:
                     *((f.value if (f := c.fact(k)) else None) for k in FACTS),
                     ", ".join(must_failures(c, brief)),
                     ", ".join(c.languages), ", ".join(c.regions), c.reason, c.excluded,
-                    " ".join(c.channels), c.source_verified, " ".join(c.source_urls)])
+                    " ".join(c.channels), c.source_verified, " ".join(c.source_urls), c.killed, c.kill_reason])
     return buf.getvalue()
