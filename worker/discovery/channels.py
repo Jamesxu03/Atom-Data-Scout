@@ -36,18 +36,38 @@ def resolve_source(url: str) -> str:
         return url
 
 
+_LEGAL_SUFFIXES = {"inc", "llc", "ltd", "limited", "corp", "corporation", "co", "company", "companies",
+                   "group", "plc", "gmbh", "sa", "ag", "bv"}
+
+
+def name_variants(name: str) -> list[str]:
+    """The ways a page may write a company's name, lowercased: the name without any bracketed
+    part, each bracketed part ("Homepoint (Home Point Capital)"), and each without a legal
+    suffix ("Ebby Halliday Companies" -> "ebby halliday")."""
+    parts = [re.sub(r"\(.*?\)", " ", name), *re.findall(r"\((.*?)\)", name)]
+    out = []
+    for part in parts:
+        words = re.sub(r"[^a-z0-9 ]", " ", part.lower()).split()
+        out.append(" ".join(words))
+        while len(words) > 1 and words[-1] in _LEGAL_SUFFIXES:
+            words.pop()
+        out.append(" ".join(words))
+    return [v for v in dict.fromkeys(out) if len(v) >= 3]
+
+
 def mention_at(text: str, name: str, website: str) -> int:
-    """Where the text first mentions the company, by domain name (e.g. 'fireflies') or full
-    name; -1 if it doesn't."""
+    """Where the text first mentions the company, by domain name (e.g. 'fireflies') or name
+    (see name_variants); -1 if it doesn't."""
     text = text.lower()
     domain = normalize_domain(website) or ""
     labels = domain.split(".")
     brand = labels[-2] if len(labels) >= 2 else ""
     if len(brand) >= 3 and (i := text.find(brand)) >= 0:
         return i
-    words = re.sub(r"[^a-z0-9 ]", " ", name.lower()).split()
     # one space per replaced character, so positions still match the original text
-    return re.sub(r"[^a-z0-9 ]", " ", text).find(" ".join(words)) if words else -1
+    plain = re.sub(r"[^a-z0-9 ]", " ", text)
+    found = [m.start() for v in name_variants(name) if (m := re.search(rf"\b{re.escape(v)}\b", plain))]
+    return min(found) if found else -1
 
 
 def check_source_page(url: str) -> tuple[str, str | None, bool]:

@@ -114,13 +114,15 @@ def test_brief_form_search_and_one_ranked_table(monkeypatch):
     assert "Multi-speaker meeting audio" in at.info[0].value  # the saved brief's summary
     (table,) = [df for df in at.dataframe if "Fit" in df.value.columns]
     # one table by fit: below-threshold and excluded hidden, unknown fit last
-    assert list(table.value["Company"]) == ["EgoData", "Otter", "Down"]
-    assert list(table.value["Fit"]) == ["4.8", "4.0", "?"]
+    # fits are recomputed on load: Otter's consent obstacle doesn't cap it, and EgoData shows no
+    # evidence for the brief's language
+    assert list(table.value["Company"]) == ["Otter", "EgoData"]  # Down: not screened, hidden
+    assert list(table.value["Fit"]) == ["3.9", "3.6"]  # Otter: English, but no Gulf evidence
     # Otter: exists 5 and allowed 2 verified by research, willing 3 still the screen's
-    assert list(table.value["Saleability"])[:2] == ["prior: offered, licence not checked", "Low (initial)"]
-    assert list(table.value["Type"])[:2] == ["Ready source", "Untapped"]
+    assert list(table.value["Saleability"])[:2] == ["Low (initial)", "prior: offered, licence not checked"]
+    assert list(table.value["Type"])[:2] == ["Untapped", "Ready source"]
     assert list(table.value["Obstacle → how to buy"])[:2] == [
-        "", "customers own the recordings → needs its customers' consent"]
+        "customers own the recordings → needs its customers' consent", ""]
     research = _button(at, "Research selected")
     assert research.label == "Research selected (0)" and research.disabled
     assert any("not legal advice" in c.value for c in at.caption)
@@ -131,6 +133,10 @@ def test_brief_form_search_and_one_ranked_table(monkeypatch):
     saved = sessions.load(path).brief
     assert saved.pick("region").source == "inferred" and saved.pick("modality").importance == "must"
     assert any(b.label.startswith(f"**{meta.name}**") for b in at.sidebar.button)
+
+
+def _otter(path) -> Candidate:
+    return next(c for c in sessions.load(path).discovery.candidates if c.domain == "otter.ai")
 
 
 def test_reopen_session_research_panel_and_email(monkeypatch):
@@ -145,7 +151,7 @@ def test_reopen_session_research_panel_and_email(monkeypatch):
     next(b for b in at.sidebar.button if b.label.startswith("**Meeting audio**")).click().run()
     assert not at.exception
     assert [e.label for e in at.expander if e.label.startswith("Otter")] == [
-        "Otter — fit 4.0 — Low (initial)"]
+        "Otter — fit 4.4 — Low (initial)"]
     assert any("Customers own the recordings they make" in m.value for m in at.markdown)
     assert any(m.value.startswith("- **Allowed?** 2/5 (verified)") for m in at.markdown)
     assert any(m.value.startswith("- **Willing?** 3/5 (initial)") for m in at.markdown)
@@ -154,11 +160,11 @@ def test_reopen_session_research_panel_and_email(monkeypatch):
     _button(at, "Draft email").click().run()
     assert not at.exception
     assert at.text_input(key=f"subject-{s.path.name}-otter.ai").value == "Meeting recordings"
-    saved = sessions.load(s.path).discovery.candidates[1]
+    saved = _otter(s.path)
     assert saved.email == EmailDraft(to="privacy@otter.ai", subject="Meeting recordings", body="Dear team, ...")
 
     at.text_input(key=f"subject-{s.path.name}-otter.ai").input("Licensing meeting recordings").run()
-    assert sessions.load(s.path).discovery.candidates[1].email.subject == "Licensing meeting recordings"
+    assert _otter(s.path).email.subject == "Licensing meeting recordings"
 
     _button(at, "New session from this brief").click().run()
     assert next(m for m in at.multiselect if m.label == "Languages and dialects").value == ["English"]
@@ -183,18 +189,24 @@ def test_language_and_volume_filters_and_price_and_age_columns():
     def table():
         return next(df for df in at.dataframe if "Fit" in df.value.columns).value
 
-    assert list(table()["Company"]) == ["EgoData", "Otter", "Down"]
-    assert list(table()["Price"]) == ["$30 per audio hour", "?", "?"]
-    assert list(table()["Founded"])[1] == f"2016 ({date.today().year - 2016} years)"
+    assert list(table()["Company"]) == ["Otter", "EgoData"]
+    assert list(table()["Price"]) == ["?", "$30 per audio hour"]
+    assert list(table()["Founded"])[0] == f"2016 ({date.today().year - 2016} years)"
 
     at.multiselect(key=f"languages-{key}").set_value(["English"]).run()
     assert list(table()["Company"]) == ["Otter"]  # the only one with evidence for English
     at.multiselect(key=f"languages-{key}").set_value([]).run()
 
     at.select_slider(key=f"volume-{key}").set_value(4).run()
-    assert list(table()["Company"]) == ["EgoData", "Otter", "Down"]  # unknown volume still shown
+    assert list(table()["Company"]) == ["Otter", "EgoData"]  # unknown volume still shown
     at.toggle(key=f"unknown-volume-{key}").set_value(True).run()
     assert list(table()["Company"]) == ["Otter"]
+    at.toggle(key=f"unknown-volume-{key}").set_value(False).run()
+
+    at.toggle(key=f"excluded-{key}").set_value(True).run()  # not screened and excluded companies
+    shown = table()
+    assert list(shown["Company"]) == ["Otter", "EgoData", "Down", "Payroll Co"]
+    assert list(shown["Type"])[2:] == ["Not screened", "Excluded"]
     assert not at.exception
 
 

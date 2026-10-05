@@ -6,7 +6,7 @@ from worker.brief_template import CUSTOMER_EXCLUDE, READY, Pick
 from worker.config import MUST_HAVE_CAP, NOT_SELLABLE_CAP, SCREEN_BATCH_SIZE
 from worker.schemas import Candidate
 from worker.scoring import is_relevant, rank
-from worker.steps.screen import ScreenBatch, ScreenItem, Stated, screen, source_excerpt
+from worker.steps.screen import NO_HOMEPAGE, ScreenBatch, ScreenItem, Stated, screen, source_excerpt
 
 
 def _cand(domain):
@@ -55,7 +55,7 @@ def test_screen_scores_and_excludes(fake_ask):
     assert good.fit == round((0.4 * 5 + 0.25 * 5 + 0.2 * 3) / 0.85, 2)
     assert by["no-c.com"].excluded
     assert by["down.com"].fit is None and not by["down.com"].excluded  # unreachable is kept, not judged
-    assert "unreachable" in by["down.com"].reason
+    assert by["down.com"].reason.startswith("not screened: homepage couldn't be read")
     assert by["silent-d.com"].screened and by["silent-d.com"].fit is None  # model skipped it
     assert [c.domain for c in rank(cands)][:2] == ["good-a.com", "mid-b.com"]
     assert [c.domain for c in cands if is_relevant(c)] == ["good-a.com", "mid-b.com"]
@@ -196,10 +196,6 @@ def test_coverage_unknown_when_brief_names_no_languages_or_regions(fake_ask):
     c = _cand("good-nolang.com")
     screen(brief_with(languages=None), [c], fetch=lambda _: "text", progress=lambda _: None)
     assert c.scores.coverage is None
-    d = _cand("good-nolang2.com")  # a language set to Any counts for nothing
-    screen(brief_with(languages=Pick(values=["English"], importance="any")), [d], fetch=lambda _: "text",
-           progress=lambda _: None)
-    assert d.scores.coverage is None
 
 
 def test_ready_source_working_on_customers_data_is_untapped(fake_ask):
@@ -309,10 +305,10 @@ def test_must_have_filters_exclude(fake_ask):
     assert not c.excluded and c.scores.licence == 1  # nice to have: "allowed" is 1, not dropped
 
 
-def test_volume_set_to_any_is_ignored(fake_ask):
+def test_volume_left_empty_is_ignored(fake_ask):
     fake_ask.responses[ScreenBatch] = _answer(volume_signal=1)
     c = _cand("acme.com")
-    screen(brief_with(volume=Pick(amount=1000, unit="hours", importance="any")), [c], fetch=lambda _: "text",
+    screen(brief_with(volume=None), [c], fetch=lambda _: "text",
            progress=lambda _: None)
     assert c.scores.volume is None
 
@@ -347,3 +343,24 @@ def test_short_fact_quotes_are_kept_when_they_contain_the_numbers(fake_ask):
            source=lambda _: None)
     assert c.founded and c.founded.value == "2016"  # 3 words, but the quote contains the year
     assert c.price is None  # the quote doesn't contain the price
+
+
+def test_blocked_homepage_is_judged_from_the_page_it_was_found_on(fake_ask):
+    fake_ask.responses[ScreenBatch] = _score_by_prefix
+    blocked, lost = _cand("good-blocked.com"), _cand("good-lost.com")
+
+    def fetch(url):
+        request = httpx.Request("GET", url)
+        raise httpx.HTTPStatusError("403", request=request, response=httpx.Response(403, request=request))
+
+    def source(c):
+        return "Source page on another site (https://news.example/a), passage mentioning it:\nx" if c is blocked else None
+
+    screen(BRIEF, [blocked, lost], fetch=fetch, progress=lambda _: None, source=source)
+    assert blocked.fit is not None
+    assert blocked.reason.endswith("(homepage blocks automated access (HTTP 403): judged from the page it was found on)")
+    assert (lost.fit, lost.excluded) == (None, False)
+    assert lost.reason == ("not screened: homepage blocks automated access (HTTP 403), "
+                           "and no other page about it was found")
+    (call,) = fake_ask.calls
+    assert NO_HOMEPAGE in call.prompt and "good-lost.com" not in call.prompt

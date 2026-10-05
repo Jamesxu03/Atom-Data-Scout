@@ -5,25 +5,30 @@ score, checks and verified saleability answers (research); everything else is a 
 The licence score depends on the holder type:
 - ready source: 4 until research finds its licence, then 5 if D1 accepts it, otherwise 1
 - untapped holder: its saleability grade, the lowest of three answers (does the data exist, is
-  selling it allowed, are they willing), because all three must hold for a purchase. A grade of
-  1 or 2 also caps the fit.
+  selling it allowed, are they willing), because all three must hold for a purchase; 3 (medium)
+  while all three are unknown.
+
+An untapped holder graded not sellable (an answer of 1) is capped, the screen's grade too; a low
+grade (2) caps only once research verified it (see capping_grade). The screen's 2s are guesses
+from a homepage, so they only weigh in through the licence score: capping on them buried the
+holders of their customers' data (consent puts "allowed" at 2) whatever research might find.
 
 Tool vendors (untapped companies whose customers record and own the data) are capped below
 RELEVANT_FIT: they lead to holders but aren't one.
 
-How importance works (see worker/brief_template.py):
-- must: counted in the score, and the fit is capped when evidence contradicts it
-- nice: counted in the score
-- any: ignored
+How the brief counts (see worker/brief_template.py):
+- a category that is filled in counts in the score
+- with its Must switch on, the fit is also capped when evidence contradicts it
+- an empty category is ignored
 Unknown evidence stays neutral: an unknown score is left out and the weights rescaled.
 """
 
 from worker.brief_template import (
     COMMERCIAL,
-    CUSTOM_COLLECTION,
     CUSTOMER_CONSENT,
     CUSTOMER_EXCLUDE,
     EXCLUSIVE,
+    EXISTING_ONLY,
     INTERNAL_ONLY,
     UNCLEAR,
     Brief,
@@ -56,12 +61,15 @@ def coverage(brief: Brief, languages: list[str], regions: list[str]) -> int | No
 
 GRADES = {5: "High", 4: "High", 3: "Medium", 2: "Low", 1: "Not sellable"}
 READY_PRIOR = 4  # a ready source offers the data; research then checks its licence against D1
+# An untapped holder with no saleability answer yet: medium, as with one answer known. Left out,
+# the unknown grade would rescale the other weights and rank it above holders graded medium.
+UNTAPPED_PRIOR = 3
 
 
 def answers(c: Candidate, brief: Brief) -> dict[str, int | None]:
     """The three saleability scores (research's where verified, otherwise the screen's). Data its
-    customers own is at most 2 on "allowed" (it needs their consent), or 1 if D6 excludes it;
-    D6 "accept, check later" leaves the answer as it is."""
+    customers own is at most 2 on "allowed" (it needs their consent), or 1 if D3 excludes it;
+    D3 "accept, check later" leaves the answer as it is."""
     s = c.current_saleability()
     scores = {q: clamp(getattr(s, q).score) if s else None for q in SALEABILITY_QUESTIONS}
     if c.data_owner == "customers":
@@ -80,6 +88,29 @@ def grade(c: Candidate, brief: Brief) -> int | None:
     if not known:
         return None
     return min(known) if len(known) >= 2 else min(min(known), 3)
+
+
+def capping_grade(c: Candidate, brief: Brief) -> int | None:
+    """What may cap an untapped holder's fit, None when nothing does:
+    - any answer of 1 (not sellable), the screen's too: it names a clear reason (no data kept,
+      legal privilege, a big brand). Research lifts it by verifying a better answer.
+    - a 2 on "exists" or "allowed" only once research verified it: the screen's 2s are guesses
+    - 1 when D3 excludes data its customers own
+    Neither "willing" at 2 nor the consent data its customers own needs ("allowed" at 2) ever
+    caps: a holder can be persuaded, and consent is a way to buy the data."""
+    s = c.current_saleability()
+    found = []
+    for q in SALEABILITY_QUESTIONS:
+        a = getattr(s, q) if s else None
+        if a is None or a.score is None:
+            continue
+        if a.score == 1:
+            found.append(1)
+        elif a.verified and q != "willing" and not (q == "allowed" and c.data_owner == "customers"):
+            found.append(a.score)
+    if c.data_owner == "customers" and CUSTOMER_EXCLUDE in brief.active("customer_data"):
+        found.append(1)
+    return clamp(min(found)) if found else None
 
 
 def is_verified(c: Candidate) -> bool:
@@ -138,8 +169,8 @@ def must_failures(c: Candidate, brief: Brief) -> list[str]:
     if (brief.must("customer_data") and c.data_owner == "customers" and c.holder_type == "untapped"
             and CUSTOMER_EXCLUDE in brief.active("customer_data")):
         fails.append("customer_data")
-    if c.collector and brief.must("delivery") and CUSTOM_COLLECTION not in brief.active("delivery"):
-        fails.append("delivery")  # the buyer wants existing data, not data recorded to order
+    if c.collector and brief.must("collection") and EXISTING_ONLY in brief.active("collection"):
+        fails.append("collection")  # the buyer wants existing data, not data recorded to order
     return list(dict.fromkeys(fails))
 
 
@@ -153,7 +184,7 @@ def fit(c: Candidate, brief: Brief) -> float | None:
         value = min(value, MUST_HAVE_CAP)
     if c.vendor:
         value = min(value, VENDOR_CAP)
-    if c.holder_type == "untapped" and (g := grade(c, brief)) is not None and g <= 2:
+    if c.holder_type == "untapped" and (g := capping_grade(c, brief)) is not None and g <= 2:
         value = min(value, NOT_SELLABLE_CAP if g == 1 else LOW_SALEABILITY_CAP)
     if c.holder_type == "ready" and c.research and c.research.licence == INTERNAL_ONLY:
         value = min(value, INTERNAL_ONLY_CAP)
@@ -161,10 +192,12 @@ def fit(c: Candidate, brief: Brief) -> float | None:
 
 
 def licence_score(c: Candidate, brief: Brief) -> int | None:
-    """The licence slot of fit: the saleability grade for untapped holders, the licence for ready
-    sources (ignored when D1 is set to Any, unless research found it is for internal use only)."""
+    """The licence slot of fit: the saleability grade for untapped holders (medium while unknown),
+    the licence for ready sources (ignored when D1 is empty, unless research found it is for
+    internal use only)."""
     if c.holder_type == "untapped":
-        return grade(c, brief)
+        g = grade(c, brief)
+        return UNTAPPED_PRIOR if g is None else g
     if c.holder_type != "ready":
         return None
     found = c.research.licence if c.research else None
@@ -179,7 +212,7 @@ def licence_score(c: Candidate, brief: Brief) -> int | None:
 def rescore(c: Candidate, brief: Brief, volume_signal: int | None = None) -> None:
     """Recompute coverage, licence, volume and fit (in place). Research, where done, replaces the
     ready-source prior, the screen's saleability answers and its volume signal; anything research
-    couldn't verify leaves them as they were. Categories set to Any count for nothing."""
+    couldn't verify leaves them as they were. Empty categories count for nothing."""
     c.scores.coverage = coverage(brief, c.languages, c.regions)
     c.scores.licence = licence_score(c, brief)
     if volume_signal is not None:

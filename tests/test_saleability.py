@@ -9,10 +9,11 @@ import pytest
 from tests.test_hypotheses import BRIEF, brief_with
 from worker import archetypes, pipeline
 from worker.brief_template import (
-    CUSTOM_COLLECTION,
+    COLLECTION_OK,
     CUSTOMER_CONSENT,
     CUSTOMER_EXCLUDE,
     CUSTOMER_LATER,
+    EXISTING_ONLY,
     OPEN_CONDITIONS,
     READY,
     UNTAPPED,
@@ -23,7 +24,16 @@ from worker.config import LOW_SALEABILITY_CAP, NOT_SELLABLE_CAP, VENDOR_CAP
 from worker.crawl import CrawlResult, Page
 from worker.discovery import pick_seeds, seed_types
 from worker.schemas import Answer, Candidate, Evidence, Research, Saleability, Scores
-from worker.scoring import answers, fit, grade, must_failures, saleability_label
+from worker.scoring import (
+    answers,
+    capping_grade,
+    fit,
+    grade,
+    licence_score,
+    must_failures,
+    rescore,
+    saleability_label,
+)
 from worker.steps.email import build_prompt as email_prompt
 from worker.steps.research import build_prompt, verify_research
 from worker.steps.screen import ScreenBatch, ScreenItem, screen
@@ -64,13 +74,49 @@ def test_grade_is_the_lowest_answer(scores, expected, label):
     assert (grade(c, BRIEF), saleability_label(c, BRIEF)) == (expected, label)
 
 
-def test_grade_caps_the_fit():
-    assert fit(_untapped(5, 1, 5).model_copy(update={"scores": TOP.model_copy(update={"licence": 1})}),
-               BRIEF) == NOT_SELLABLE_CAP
-    assert fit(_untapped(5, 2, 5).model_copy(update={"scores": TOP.model_copy(update={"licence": 2})}),
-               BRIEF) == LOW_SALEABILITY_CAP
-    medium = _untapped(5, 3, 5).model_copy(update={"scores": TOP.model_copy(update={"licence": 3})})
-    assert fit(medium, BRIEF) == round((0.4 * 5 + 0.25 * 5 + 0.2 * 3 + 0.15 * 5), 2)  # no cap
+def _scored(c: Candidate, licence: int) -> Candidate:
+    return c.model_copy(update={"scores": TOP.model_copy(update={"licence": licence})})
+
+
+def _weighted(licence: int) -> float:
+    return round(0.4 * 5 + 0.25 * 5 + 0.2 * licence + 0.15 * 5, 2)
+
+
+def test_not_sellable_always_caps_low_only_once_verified():
+    # not sellable (a 1 anywhere), the screen's or research's: capped
+    for scores in ((5, 1, 5), (1, 5, 5), (5, 5, 1)):
+        assert fit(_scored(_untapped(*scores), 1), BRIEF) == NOT_SELLABLE_CAP
+        assert fit(_scored(_untapped(*scores, verified=True), 1), BRIEF) == NOT_SELLABLE_CAP
+    # low (2): capped once research verified it, the screen's guess only weighs in the licence score
+    assert fit(_scored(_untapped(5, 2, 5, verified=True), 2), BRIEF) == LOW_SALEABILITY_CAP
+    assert fit(_scored(_untapped(5, 2, 5), 2), BRIEF) == _weighted(2)
+    assert fit(_scored(_untapped(5, 5, 2, verified=True), 2), BRIEF) == _weighted(2)  # willing at 2 never caps
+    # research verifying a better answer lifts the screen's 1
+    lifted = _untapped(5, 1, 5)
+    lifted.research = Research(data_held="d", licence="Unclear", licence_evidence=[], volume_estimate=None,
+                               volume_score=None, volume_evidence=[], saleability=_sal(None, 4, None, verified=True))
+    assert capping_grade(lifted, BRIEF) == 4 and fit(_scored(lifted, 4), BRIEF) == _weighted(4)
+
+
+def test_unknown_saleability_counts_as_medium_not_as_missing():
+    unknown, medium, low = (_untapped(*a) for a in ((None, None, None), (5, 3, 5), (5, 2, 5)))
+    assert [licence_score(c, BRIEF) for c in (unknown, medium, low)] == [3, 3, 2]
+    for c in (unknown, medium, low):
+        c.scores = TOP.model_copy()  # rescore writes into the scores
+        rescore(c, BRIEF)
+    assert unknown.fit == medium.fit > low.fit  # left out, unknown would rank above medium
+
+
+def test_customers_data_is_capped_only_when_the_buyer_excludes_it():
+    holder = _scored(_untapped(5, 5, 5, owner="customers"), 2)
+    assert (grade(holder, BRIEF), capping_grade(holder, BRIEF)) == (2, None)  # needs consent: a way to buy it
+    assert fit(holder, BRIEF) == _weighted(2)
+    consent = _scored(_untapped(5, 2, 5, owner="customers", verified=True), 2)  # research: needs consent
+    assert capping_grade(consent, BRIEF) == 5 and fit(consent, BRIEF) == _weighted(2)
+    forbidden = _scored(_untapped(5, 1, 5, owner="customers", verified=True), 1)
+    assert fit(forbidden, BRIEF) == NOT_SELLABLE_CAP
+    excluded = brief_with(customer_data=Pick(values=[CUSTOMER_EXCLUDE]))
+    assert capping_grade(holder, excluded) == 1 and fit(holder, excluded) == NOT_SELLABLE_CAP
 
 
 def test_customers_data_needs_consent_unless_d6_says_otherwise():
@@ -165,16 +211,17 @@ def test_source_type_must_have_excludes_the_other_type(fake_ask):
     assert not _run(fake_ask, brief_with(sources=Pick(values=[READY]))).excluded  # nice to have
 
 
-def test_collectors_fail_a_must_have_delivery_without_custom_collection():
-    existing_only = brief_with(delivery=Pick(values=["One-off dataset"], importance="must"))
+def test_collectors_fail_a_must_have_existing_data_only():
+    existing_only = brief_with(collection=Pick(values=[EXISTING_ONLY], importance="must"))
     collector = _cand(holder_type="ready", collector=True, scores=Scores(data_match=5))
-    assert must_failures(collector, existing_only) == ["delivery"]
+    assert must_failures(collector, existing_only) == ["collection"]
     assert must_failures(_cand(holder_type="ready", scores=Scores(data_match=5)), existing_only) == []
-    assert must_failures(collector, brief_with(delivery=Pick(values=[CUSTOM_COLLECTION], importance="must"))) == []
+    assert must_failures(collector, brief_with(collection=Pick(values=[EXISTING_ONLY]))) == []  # nice to have
+    assert must_failures(collector, brief_with(collection=Pick(values=[COLLECTION_OK], importance="must"))) == []
 
 
 def test_collectors_seed_snowball_only_when_custom_collection_is_wanted():
-    custom = brief_with(delivery=Pick(values=[CUSTOM_COLLECTION]))
+    custom = brief_with(collection=Pick(values=[COLLECTION_OK]))
     assert (seed_types(BRIEF), seed_types(custom)) == (["untapped"], ["untapped", "collector"])
     cands = [_cand("c.com", holder_type="ready", collector=True, fit=4.5, scores=Scores(data_match=5, coverage=5)),
              _cand("u.com", holder_type="untapped", fit=4.0, scores=Scores(data_match=5, coverage=5))]

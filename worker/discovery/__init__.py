@@ -20,7 +20,7 @@ from collections.abc import Callable
 
 from pydantic import BaseModel
 
-from worker.brief_template import CUSTOM_COLLECTION, READY, UNTAPPED, Brief
+from worker.brief_template import COLLECTION_OK, READY, UNTAPPED, Brief
 from worker.config import (
     DISCOVERY,
     PARALLEL_FETCHES,
@@ -164,7 +164,7 @@ def discover(brief: Brief, hypotheses: list[HolderHypothesis], progress: Progres
 def seed_types(brief: Brief) -> list[str]:
     """Untapped holders; collectors too when the buyer wants data recorded to order, since a
     collector's competitors are other collectors."""
-    return SNOWBALL_SEED_TYPES + (["collector"] if CUSTOM_COLLECTION in brief.active("delivery") else [])
+    return SNOWBALL_SEED_TYPES + (["collector"] if COLLECTION_OK in brief.active("collection") else [])
 
 
 def _seed_type(c: Candidate) -> str | None:

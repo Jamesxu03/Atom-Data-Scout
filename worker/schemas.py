@@ -9,6 +9,7 @@ from worker.brief_template import (
     CATEGORIES,
     COMMERCIAL,
     INTERNAL_ONLY,
+    OLD_CHECKS,
     OPEN,
     RESTRICTED,
     UNCLEAR,
@@ -141,6 +142,14 @@ class Check(BaseModel):
     finding: str = Field(description="One line: what the pages say")
     evidence: list[Evidence]
 
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade(cls, data):
+        """Checks of categories the older template had are now the deal terms check."""
+        if isinstance(data, dict) and data.get("category") in OLD_CHECKS:
+            data = {**data, "category": "deal_terms"}
+        return data
+
 
 # Research saved before the D1 labels existed
 _OLD_STATUS = {"sellable": COMMERCIAL, "open": OPEN, "open_restricted": RESTRICTED,
@@ -171,6 +180,11 @@ class EmailDraft(BaseModel):
     to: str | None = None
     subject: str
     body: str
+
+
+# Keys of the older template merged into today's
+_MERGED_KEYS = {"delivery": "collection", "overlap": "speakers", "timestamps": "transcript",
+                "speaker_labels": "transcript"}
 
 
 class Candidate(Facts):
@@ -207,12 +221,15 @@ class Candidate(Facts):
     @model_validator(mode="before")
     @classmethod
     def _upgrade(cls, data):
-        """Sessions saved with earlier holder types."""
+        """Sessions saved with earlier holder types or template keys."""
         if isinstance(data, dict) and data.get("holder_type") in _OLD_HOLDER_TYPES:
             holder, collector = _OLD_HOLDER_TYPES[data["holder_type"]]
             data = {**data, "holder_type": holder, "collector": collector or data.get("collector", False)}
             if holder is None:
                 data["excluded"] = True
+        if isinstance(data, dict) and data.get("contradicts"):  # keys of the older template
+            renamed = [_MERGED_KEYS.get(k, k) for k in data["contradicts"]]
+            data = {**data, "contradicts": [k for k in dict.fromkeys(renamed) if k in CATEGORIES]}
         return data
 
     def current_saleability(self) -> Saleability | None:

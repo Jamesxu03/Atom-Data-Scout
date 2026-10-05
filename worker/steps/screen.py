@@ -11,7 +11,7 @@ Rules the model doesn't apply reliably are enforced afterwards (see _apply): onl
 buyer's languages and regions count, only must-have categories can be contradicted, a ready
 source whose data belongs to its customers is a service, so an untapped holder, and saleability
 applies to untapped holders only. Unrelated companies, dead websites and companies a must-have
-filter rules out (E1 source types, D6 customers' data) are excluded.
+filter rules out (E1 source types, D3 customers' data) are excluded.
 """
 
 import re
@@ -177,7 +177,19 @@ Return one result per organisation, using the domain exactly as given, with a on
 {companies}
 """
 
-Fetched = tuple[Candidate, str, str | None]  # candidate, homepage text, source-page excerpt
+Fetched = tuple[Candidate, str, str | None]  # candidate, homepage text ("" if blocked), source-page excerpt
+NO_HOMEPAGE = "(couldn't be read: judge from the source page below only)"
+
+
+def unreachable_reason(e: Exception) -> str:
+    """Why the homepage couldn't be read, in words."""
+    if isinstance(e, httpx.HTTPStatusError):
+        code = e.response.status_code
+        return (f"homepage blocks automated access (HTTP {code})" if code in (401, 403, 405, 429, 503)
+                else f"homepage returned HTTP {code}")
+    if isinstance(e, httpx.TimeoutException):
+        return "homepage timed out"
+    return f"homepage couldn't be read ({type(e).__name__})"
 
 
 def _is_homepage(url: str, website: str) -> bool:
@@ -211,7 +223,8 @@ def source_excerpt(c: Candidate, fetch: Callable[[str], str] = fetch_html_quick)
 
 def _screen_batch(brief: Brief, batch: list[Fetched]) -> dict[str, ScreenItem]:
     companies = "\n\n".join(
-        f"### {c.domain} ({c.name})\nHomepage:\n{home[:SCREEN_TEXT_CHARS]}" + (f"\n\n{src}" if src else "")
+        f"### {c.domain} ({c.name})\nHomepage:\n{home[:SCREEN_TEXT_CHARS] or NO_HOMEPAGE}"
+        + (f"\n\n{src}" if src else "")
         for c, home, src in batch
     )
     prompt = PROMPT.format(
@@ -311,15 +324,23 @@ def screen(
     if not todo:
         return candidates
 
+    blocked: dict[str, str] = {}  # domain -> why its homepage couldn't be read
+
     def try_fetch(c: Candidate) -> Fetched | None:
-        """Homepage text and source excerpt, or None with the failure recorded on the candidate."""
+        """Homepage text and source excerpt. A blocked homepage (bot protection, timeouts) is
+        judged from the page on another site search found it on, if there is one; with no page
+        at all it is None, with the failure recorded on the candidate."""
         try:
             home = fetch(c.website)
         except Exception as e:
             if is_dead_site(e):
                 c.reason, c.excluded = "dead website: domain doesn't exist", True
-            else:  # can't judge without a homepage; keep it (fit unknown) rather than lose it
-                c.reason = f"homepage unreachable ({type(e).__name__})"
+                return None
+            why = unreachable_reason(e)
+            if src := source(c):
+                blocked[c.domain] = why
+                return c, "", src
+            c.reason = f"not screened: {why}, and no other page about it was found"  # kept, fit unknown
             return None
         return c, home, source(c)
 
@@ -327,7 +348,7 @@ def screen(
     fetched = dict(run_parallel(
         [(c.domain, lambda c=c: try_fetch(c)) for c in todo], PARALLEL_FETCHES, lambda _: None
     ).results)
-    reachable = [f for c in todo if (f := fetched.get(c.domain)) and f[1]]
+    reachable = [f for c in todo if (f := fetched.get(c.domain)) and (f[1] or f[2])]
 
     batches = [reachable[i : i + SCREEN_BATCH_SIZE] for i in range(0, len(reachable), SCREEN_BATCH_SIZE)]
     screened = run_parallel(
@@ -341,6 +362,8 @@ def screen(
             item = items.get(c.domain)
             if item:
                 _apply(brief, c, item, home, src)
+                if c.domain in blocked:
+                    c.reason = f"{c.reason} ({blocked[c.domain]}: judged from the page it was found on)"
             else:
                 c.reason = "not screened by the model"
     if screened.quota_error:

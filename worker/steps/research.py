@@ -1,7 +1,7 @@
 """Research step, for companies the user selects: what data they hold, how much, price and age
 (founding year, when the data was recorded), a check of each requirement the brief marks for
-research (V): quality evidence, demographics, recency, permitted use, personal data, documents
-and where the data can be processed, and then by holder type:
+research (V): recency, permitted use and the deal terms (personal data, documents, where the
+data can be processed, ...), and then by holder type:
 - ready source: the licence, in the same labels as D1 "Acceptable licence"
 - untapped holder: the three saleability questions (does the data still exist, is selling it
   allowed, are they willing), answered from the news and public records as well as the
@@ -109,9 +109,10 @@ Evidence rules (quotes that break them are thrown away):
 def _checks(brief: Brief) -> str:
     keys = [k for k in CheckedCategory.__args__ if brief.importance(k) != "any"]
     lines = [f"   - {k}: {CATEGORIES[k].label}: {brief.value_text(k)}" for k in keys]
-    flags = transfer_flags(brief.regions, brief.chosen("processing"))
-    if flags and "processing" in keys:
-        lines.append("     Transfer rules that may apply: " + " ".join(flags))
+    flags = transfer_flags(brief.regions)
+    if flags and "deal_terms" in keys:
+        lines.append("     Transfer rules that may apply, depending on where the buyer processes the data: "
+                     + " ".join(flags))
     return "\n".join(lines) or "   (none)"
 
 

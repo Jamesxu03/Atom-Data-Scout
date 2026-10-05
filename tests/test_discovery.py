@@ -245,6 +245,10 @@ def test_verify_source(monkeypatch):
     assert channels.verify_source(Found(**ff, source_url="https://gone.example/x"))[1] is False
     # by full name when the domain label is too short to be meaningful
     assert channels.mention_at("<p>We love Read AI</p>", "Read AI", "https://www.read.ai") >= 0
+    home = "https://www.homepointfinancial.com"
+    assert channels.mention_at("Lender Homepoint is closing", "Homepoint (Home Point Capital)", home) == 7
+    assert channels.mention_at("Ebby Halliday agents", "Ebby Halliday Companies", "https://ebby.com") >= 0
+    assert channels.mention_at("in the public interest", "Public-i Group Ltd", "https://public-i.tv") == -1
 
 
 def test_verify_source_resolves_grounding_redirect(monkeypatch):

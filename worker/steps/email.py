@@ -56,8 +56,8 @@ def _facts(c: Candidate) -> str:
     return "\n".join(lines) or "- Nothing beyond its name and website."
 
 
-# Deal terms the email may ask about: every E category except the budget, which is never stated
-EMAIL_TERMS = [k for k, c in CATEGORIES.items() if "E" in c.used_for and k != "budget"]
+# What the email may ask about: every E category (the prompt keeps any budget in them unsaid)
+EMAIL_TERMS = [k for k, c in CATEGORIES.items() if "E" in c.used_for]
 
 
 def _terms(brief: Brief) -> str:

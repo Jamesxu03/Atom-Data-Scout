@@ -69,9 +69,11 @@ def test_must_have_contradictions():
     # untapped holders are judged by saleability, not D1
     untapped = _cand(scores=TOP, holder_type="untapped", research=_research(UNCLEAR))
     assert must_failures(untapped, must_licence) == []
-    docs = brief_with(documents=Pick(values=["Per-person consent records"], importance="must"))
-    failed = Check(category="documents", verdict="fails", finding="no consent records", evidence=QUOTE)
-    assert must_failures(_cand(scores=TOP, research=_research(checks=[failed])), docs) == ["documents"]
+    docs = brief_with(deal_terms=Pick(values=["Per-person consent records"], importance="must"))
+    failed = Check(category="deal_terms", verdict="fails", finding="no consent records", evidence=QUOTE)
+    assert must_failures(_cand(scores=TOP, research=_research(checks=[failed])), docs) == ["deal_terms"]
+    old = Check.model_validate({**failed.model_dump(), "category": "documents"})  # older template
+    assert old.category == "deal_terms"
     unclear = failed.model_copy(update={"verdict": "unclear"})
     assert must_failures(_cand(scores=TOP, research=_research(checks=[unclear])), docs) == []
     must_volume = brief_with(volume=Pick(amount=1000, unit="hours", importance="must"))
@@ -93,7 +95,7 @@ def test_ready_sources_start_at_4_until_research_checks_the_licence():
     assert licence_score(c, BRIEF) == 4
     assert licence_score(c.model_copy(update={"research": _research(RESTRICTED)}), BRIEF) == 1
     assert licence_score(c.model_copy(update={"research": _research(UNCLEAR)}), BRIEF) == 4  # nothing found
-    assert licence_score(c, brief_with(licence=Pick(values=[COMMERCIAL], importance="any"))) is None
+    assert licence_score(c, brief_with(licence=None)) is None
     assert licence_score(_cand(), BRIEF) is None  # unscreened
 
 
@@ -115,5 +117,5 @@ def test_research_replaces_priors_unless_it_found_nothing():
     c.research = _research(UNCLEAR)
     rescore(c, BRIEF)
     assert c.scores.licence == 4  # back to the prior, not dropped
-    rescore(c, brief_with(licence=Pick(values=[COMMERCIAL], importance="any")))
-    assert c.scores.licence is None  # licence set to Any: ignored
+    rescore(c, brief_with(licence=None))
+    assert c.scores.licence is None  # licence left empty: ignored

@@ -53,6 +53,7 @@ SEED_FIT = 3.5  # snowball seeds
 # Caps. The must-have cap sits below RELEVANT_FIT so such companies drop out of the default view.
 MUST_HAVE_CAP = 2.0  # a must-have language or region with no evidence
 INTERNAL_ONLY_CAP = 2.0  # research found a ready source's data is for internal use only
-NOT_SELLABLE_CAP = 2.0  # untapped holder graded not sellable (one of the three questions scored 1)
-LOW_SALEABILITY_CAP = 3.0  # untapped holder graded low (lowest answer 2)
+# Untapped holders: any answer of 1, the screen's too (or D3 excludes its customers' data) ...
+NOT_SELLABLE_CAP = 2.0
+LOW_SALEABILITY_CAP = 3.0  # ... or research verified a 2 on "exists" or "allowed"
 VENDOR_CAP = 2.0  # tool vendor: a way to the holders (its customers), not a source itself

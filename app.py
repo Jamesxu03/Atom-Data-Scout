@@ -24,7 +24,6 @@ from worker import pipeline, sessions
 from worker.brief_template import (
     CATEGORIES,
     CODE_LABELS,
-    IMPORTANCE_LABELS,
     SECTIONS,
     Brief,
     BriefDraft,
@@ -45,7 +44,7 @@ EXAMPLE_BRIEF = (
 )
 LOGO = "assets/atom_logo.png"
 ICON = "assets/atom_icon.png"  # square: a wide logo gets squeezed into the browser tab's favicon
-HOLDER_LABELS = {"ready": "Ready source", "untapped": "Untapped", None: "Unknown"}
+HOLDER_LABELS = {"ready": "Ready source", "untapped": "Untapped", None: "Not screened"}
 QUESTION_LABELS = {"exists": "Exists?", "allowed": "Allowed?", "willing": "Willing?"}
 VERDICT_ICONS = {"meets": "✅", "fails": "❌", "unclear": "❔"}
 LEGAL_NOTE = "Licence status is a screening flag from public pages, not legal advice."
@@ -181,8 +180,8 @@ def _help(cat: Category) -> str:
 
 
 def category_input(cat: Category, b: Brief, fid: int, picks: dict[str, Pick]) -> Pick:
-    """One category: its choices (pills, a multiselect, a number and unit, or years) and an
-    importance selector. Picks the model inferred carry an "inferred" caption until changed."""
+    """One category: its choices (pills, a multiselect, a number and unit, years or a text box)
+    and a Must switch. Picks the model inferred carry an "inferred" caption until changed."""
     old, key = b.pick(cat.key), f"{fid}-{cat.key}"
     value_col, importance_col = st.columns([4, 1], vertical_alignment="bottom")
     amount = amount_to = unit = None
@@ -201,6 +200,11 @@ def category_input(cat: Category, b: Brief, fid: int, picks: dict[str, Pick]) ->
                                     key=f"{key}-from", help=_help(cat))
             amount_to = t.number_input("to", 1900, 2100, value=int(old.amount_to) if old.amount_to else None,
                                        key=f"{key}-to")
+        elif cat.pick == "paragraph":
+            text = st.text_area(cat.label, old.values[0] if old.values else "", key=key, help=_help(cat),
+                                height=100, placeholder="e.g. identifiable voices only with documented consent; "
+                                                        "sample before purchase; processed in the UK")
+            values = [text.strip()] if text.strip() else []
         elif cat.free_text or cat.pick == "text":
             options = list(cat.choices)
             if cat.key == "languages":  # suggestions follow the regions picked above
@@ -216,9 +220,9 @@ def category_input(cat: Category, b: Brief, fid: int, picks: dict[str, Pick]) ->
                               key=key, help=_help(cat))
             values = [chosen] if isinstance(chosen, str) else list(chosen or [])
     with importance_col:
-        importance = st.segmented_control(
-            "Importance", list(IMPORTANCE_LABELS), default=old.importance, format_func=IMPORTANCE_LABELS.get,
-            key=f"{key}-importance", label_visibility="collapsed") or "any"
+        must = st.toggle("Must", value=old.importance == "must", key=f"{key}-must",
+                         help="Caps the fit when evidence contradicts it")
+    importance = "must" if must else "nice"
     new = Pick(values=values, amount=amount, amount_to=amount_to, unit=unit if amount is not None else None,
                importance=importance)
     same = (new.values, new.amount, new.amount_to, new.importance) == (old.values, old.amount, old.amount_to,
@@ -236,8 +240,8 @@ def form_page(draft: BriefDraft) -> None:
         st.rerun()
     if draft.questions:
         st.info("**Check with the buyer**\n" + "\n".join(f"- {q}" for q in draft.questions))
-    st.caption("Importance: **Must have** caps the fit when evidence contradicts it · **Nice to have** is "
-               "weighted into the score · **Any** is ignored. Unknown evidence stays neutral.")
+    st.caption("Whatever is filled in is weighted into the score; leave a category empty to ignore it. "
+               "**Must** also caps the fit when evidence contradicts it. Unknown evidence stays neutral.")
 
     name = st.text_input("Session name", st.session_state.get("session_name") or b.description, key=f"{fid}-name")
     description = st.text_input("What data, in a few words", b.description, key=f"{fid}-description",
@@ -247,11 +251,11 @@ def form_page(draft: BriefDraft) -> None:
         if section.modalities and not set(picks["modality"].values) & set(section.modalities):
             continue  # add-ons appear once their modality is ticked
         title = section.title if section.modalities else f"{section.code}. {section.title}"
-        with st.expander(title, expanded=section.code in ("A", "B", "C") or bool(section.modalities)):
+        with st.expander(title, expanded=True):
             for cat in section.categories:
                 picks[cat.key] = category_input(cat, b, fid, picks)
-            if section.code == "D":
-                for flag in transfer_flags(picks["region"].values, picks["processing"].values):
+            if section.code == "B":
+                for flag in transfer_flags(picks["region"].values):
                     st.warning(flag)
     notes = st.text_area("Notes", b.notes, key=f"{fid}-notes")
 
@@ -326,7 +330,7 @@ def session_page(path: str) -> None:
     st.subheader(s.meta.name)
     st.caption(f"Created {s.meta.created:%d %b %Y, %H:%M}")
     st.info(s.brief.summary())
-    for flag in transfer_flags(s.brief.regions, s.brief.chosen("processing")):
+    for flag in transfer_flags(s.brief.regions):
         st.warning(flag)
     st.fragment(progress_panel, run_every=1 if job_here else None)(path)
 
@@ -366,11 +370,13 @@ def candidates_table(s: sessions.Session, path: str) -> None:
     key = Path(path).name
     left, mid, right = st.columns([2, 3, 1])
     min_fit = left.slider("Minimum fit", 1.0, 5.0, RELEVANT_FIT, 0.5, key=f"fit-{key}",
-                          help="Companies whose fit is unknown (homepage unreachable) are always shown, last")
+                          help="Companies that couldn't be screened (no readable page) show with Show excluded")
     present = list(dict.fromkeys(c.holder_type for c in s.discovery.candidates if not c.excluded))
     types = mid.multiselect("Type", present, default=present, format_func=HOLDER_LABELS.get, key=f"types-{key}")
     show_excluded = right.toggle("Show excluded", key=f"excluded-{key}",
-                                 help="Unrelated companies, dead websites, and ones a must-have filter rules out")
+                                 help="Unrelated companies, dead websites, ones a must-have filter rules out, and "
+                                      "ones not screened because their site blocks automated access and no other "
+                                      "page about them was found (the Reason column says why)")
     min_volume = left.select_slider(
         "Minimum volume", [1, 2, 3, 4, 5], 1, key=f"volume-{key}",
         format_func=lambda v: "Any" if v == 1 else f"{v} or more",
@@ -385,7 +391,7 @@ def candidates_table(s: sessions.Session, path: str) -> None:
                                      "customers hold the data, so they are hidden and their fit is capped at 2.0.")
 
     def shown(c: Candidate) -> bool:
-        if c.excluded:
+        if c.excluded or c.fit is None:  # ruled out, or nothing to judge it by
             return show_excluded
         if c.vendor:
             if not show_vendors:
@@ -432,7 +438,8 @@ def candidates_table(s: sessions.Session, path: str) -> None:
             "Saleability": st.column_config.TextColumn(
                 help="Ready sources: the licence (prior until research checks it). Untapped: the lowest of three "
                      "answers (exists, allowed, willing): High, Medium, Low or Not sellable; initial from the "
-                     "homepage, verified once research finds quotes. " + LEGAL_NOTE),
+                     "homepage, verified once research finds quotes. Only verified answers on exists or allowed cap "
+                     "the fit; initial ones count in the licence score. " + LEGAL_NOTE),
             "Obstacle → how to buy": st.column_config.TextColumn(
                 help="Untapped holders: what stands in the way, and how it could still be bought"),
             "Coverage": st.column_config.TextColumn(help="Evidence for the brief's languages and regions"),

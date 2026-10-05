@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from worker.brief_template import Brief, from_legacy
 from worker.discovery import Discovery
 from worker.schemas import HolderHypothesis
-from worker.scoring import is_relevant
+from worker.scoring import is_relevant, rank, rescore
 from worker.steps.hypotheses import HypothesisList
 
 SESSIONS_DIR = Path(__file__).resolve().parent.parent / "data" / "sessions"
@@ -97,12 +97,17 @@ def _read_brief(path: Path) -> Brief:
 def load(path: Path | str) -> Session:
     path = Path(path)
     hyps = _read(path / "hypotheses.json", HypothesisList)
+    brief = _read_brief(path / "brief.json")
+    discovery = _read(path / "discovery.json", Discovery) or Discovery(hits=[], candidates=[])
+    for c in discovery.candidates:  # today's scoring rules, from the stored screen and research results
+        rescore(c, brief)
+    discovery.candidates = rank(discovery.candidates)
     return Session(
         path=path,
         meta=_read(path / "session.json", SessionMeta),
-        brief=_read_brief(path / "brief.json"),
+        brief=brief,
         hypotheses=hyps.hypotheses if hyps else [],
-        discovery=_read(path / "discovery.json", Discovery) or Discovery(hits=[], candidates=[]),
+        discovery=discovery,
     )
 
 

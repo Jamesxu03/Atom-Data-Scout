@@ -76,12 +76,12 @@ def test_quote_matching():
 
 
 def test_checks_need_a_verified_quote():
-    shown = Check(category="personal_data", verdict="fails", finding="identifiable recordings kept",
+    shown = Check(category="deal_terms", verdict="fails", finding="identifiable recordings kept",
                   evidence=[Evidence(quote="We record support calls for quality", url="https://acme.com/privacy")])
-    unshown = Check(category="documents", verdict="meets", finding="consent records available",
+    unshown = Check(category="permitted_use", verdict="meets", finding="licensed for training",
                     evidence=[Evidence(quote="We keep consent records for every speaker", url="https://acme.com")])
     r = verify_research(_research([], checks=[shown, unshown]), _crawl(), _no_fetch)
-    assert [(ch.category, ch.verdict) for ch in r.checks] == [("personal_data", "fails"), ("documents", "unclear")]
+    assert [(ch.category, ch.verdict) for ch in r.checks] == [("deal_terms", "fails"), ("permitted_use", "unclear")]
 
 
 def test_research_prompt_and_search(fake_ask):
@@ -89,18 +89,17 @@ def test_research_prompt_and_search(fake_ask):
         [Evidence(quote="Recordings are used only internally", url="https://acme.com/privacy")])
     c = Candidate(name="Acme", website="https://acme.com", domain="acme.com", channels=["product_search"],
                   source_urls=[], reason="contact centre")
-    brief = brief_with(region=Pick(values=["Middle East (GCC)"]), processing=Pick(values=["UK"]),
-                       documents=Pick(values=["Data processing agreement"], importance="must"),
-                       seller_share=Pick(values=["10%"]))
+    brief = brief_with(region=Pick(values=["Middle East (GCC)"]),
+                       deal_terms=Pick(values=["Data processing agreement; processed in the UK"], importance="must"))
     r = research(brief, c, _crawl(), _no_fetch)
     assert r.licence == INTERNAL_ONLY
     (call,) = fake_ask.calls
     assert call.use_search
     assert "### privacy (https://acme.com/privacy)" in call.prompt and POLICY in call.prompt
     assert f'"{INTERNAL_ONLY}"' in call.prompt and "word for word" in call.prompt
-    assert "- documents: Documents required: Data processing agreement" in call.prompt
-    assert "- processing: Where the buyer will process it: UK" in call.prompt and "PDPL" in call.prompt
-    assert "one seller should hold 10% of it" in call.prompt
+    assert "- deal_terms: Deal terms: Data processing agreement; processed in the UK" in call.prompt
+    assert "depending on where the buyer processes the data" in call.prompt and "PDPL" in call.prompt
+    assert "Volume: 1,000 hours\n" in call.prompt
     assert "- speakers" not in call.prompt  # not a research check
 
 

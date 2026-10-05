@@ -16,7 +16,9 @@ must hold: *High* (4 to 5), *Medium* (3), *Low* (2) or *Not sellable* (1). The s
 *initial* answers from the homepage; research checks them against the news, public records and
 the company's own policies, and an answer becomes *verified* once a quote is found on the page
 it cites. Each untapped holder also gets the main obstacle and how it could still be bought
-(e.g. "needs its customers' consent", "contact the administrators").
+(e.g. "needs its customers' consent", "contact the administrators"). Initial answers are
+guesses from a homepage, so they only count in the licence score; only verified ones can cap the
+fit.
 
 **Tool vendors** are untapped companies whose product is the recording tool (meeting recorders,
 call-recording software, research platforms), so their customers do the recording and hold
@@ -35,15 +37,19 @@ Initial brief → Refine (form with options) → Final brief
 ```
 
 1. **Brief.** Paste the buyer's text and click *Refine brief*. Gemini fills in the brief
-   template (`worker/brief_template.py`): the data (A), where and who (B), volume and delivery (C),
-   rights and compliance (D), where to look (E), commercial (F), plus add-ons for the modality
-   picked (audio, video/image, text, tabular). Choices are enums, so the model can only pick
-   valid ones. Each category has an importance: **Must have** (the fit is capped when evidence
-   contradicts it), **Nice to have** (weighted into the score) or **Any** (ignored). Picks the
-   model inferred rather than read are marked *inferred* and are never Must have. Open questions
-   for the buyer sit above the form, and transfer rules (e.g. Saudi PDPL, China export) show
-   when the origin and processing location call for them. Edit anything, then click
-   *Save and search*.
+   template (`worker/brief_template.py`) in one call: the data (A), where (B), volume and timing
+   (C), rights (D), where to look (E), deal terms (F), plus a few add-ons for the modality picked
+   (audio, video/image, text, tabular). The form only asks what changes who is found or how they
+   rank. Choices are enums, so the model can only pick valid ones. A category that is filled in
+   is weighted into the score and an empty one is ignored; its **Must** switch also caps the fit
+   when evidence contradicts it. Picks the model inferred rather than read are marked *inferred*
+   and are never Must. **Deal terms** (F1) is one text box for what only research and the email
+   use (personal data and consent, exclusivity, term, documents, where the data is processed,
+   sample, ...); it never reaches the screen. Details of the data too fine for a category go in
+   the **Notes**, which the screen does read. Open questions for the buyer sit above the form, and
+   transfer rules (e.g. Saudi PDPL, China export) show when the origin calls for them. Edit
+   anything, then click *Save and search*. Briefs saved with the older, longer template are
+   upgraded when loaded: removed categories become a line in the notes or the deal terms.
 2. **Search.** Runs in the background. Each company's homepage (and the page it was found on)
    is screened for holder type, data owner, how well the data matches (1 to 5), evidence for the
    brief's languages and regions, signs of scale, any must-have it clearly contradicts, and for
@@ -51,7 +57,7 @@ Initial brief → Refine (form with options) → Final brief
    It also reads any price, founding year and data period the pages state, kept only when the
    quote is on the page and contains the value's numbers (*Price*, *Data years* and *Founded*
    columns; *?* when not published).
-   Only the channels for the source type picked (E1) run; must-have filters (E1, D6) drop
+   Only the channels for the source type picked (E1) run; must-have filters (E1, D3) drop
    companies of the other type, and exclusions (E2) are skipped. The channels are:
    - ready sources: marketplaces, collection services and published datasets; open corpora
      and public bodies
@@ -65,27 +71,30 @@ Initial brief → Refine (form with options) → Final brief
    obvious by-product holders. Archetypes are not shown or stored per company.
 3. **Ranking.** Fit is a weighted mean of four 1-to-5 scores (see `worker/scoring.py`):
    data match 40%, coverage (languages and regions) 25%, licence 20%, volume 15%. Unknown scores
-   are left out and the weights rescaled; categories set to Any count for nothing. The licence
+   are left out and the weights rescaled; empty categories count for nothing. The licence
    slot depends on the type:
    - ready source: 4 until research finds its licence, then 5 if D1 accepts it, otherwise 1
-   - untapped holder: its saleability grade. Data its customers own scores at most 2 on
-     *allowed* (it needs their consent), 1 if D6 excludes it, and as found if D6 is *check
+   - untapped holder: its saleability grade, 3 (*Medium*) while it is *Unknown*. Data its customers own scores at most 2 on
+     *allowed* (it needs their consent), 1 if D3 excludes it, and as found if D3 is *check
      later*. With only one answer known
      the grade is at most 3.
 
    Fit is capped at 2.0 when the evidence contradicts a must-have (the *Must-haves not met*
-   column says which), at 2.0 for an untapped holder graded *Not sellable* and 3.0 for one
-   graded *Low*, at 2.0 for tool vendors, and at 2.0 when research finds a ready source's data is
-   for internal use only.
-   Collectors are capped when C4 is a must-have without custom collection. The table shows
+   column says which), at 2.0 for tool vendors, and at 2.0 when research finds a ready source's
+   data is for internal use only. An untapped holder is capped at 2.0 (or 3.0) only on evidence:
+   research verifies a 1 (or 2) on *exists* or *allowed*, the screen sees it keeps no data at
+   all, or D3 excludes data its customers own. *Willing* and the consent customers' data needs
+   never cap; they lower the licence score.
+   Collectors are capped when C3 *Data recorded to order* is a must-have *Existing data only*;
+   *Welcome* also searches for collectors. The table shows
    the *Saleability* column and *Obstacle → how to buy*, and filters by minimum fit, type,
    languages (evidence for at least one picked) and minimum volume score; companies with
    unknown volume stay unless *Known volume* is on. Tool vendors appear only with *Tool vendors* on.
 4. **Research.** Tick rows in the table and click *Research selected*. For each company this
    deep-crawls the homepage, privacy policy and terms, then makes one Gemini + Google Search call
    for what data it holds, how much, its price, founding year and data period, and a check of
-   each research (V) requirement: quality evidence, demographics, recency, permitted use,
-   personal data, documents, processing location. Then, by type:
+   each research (V) requirement: recency, permitted use and the deal terms (with the transfer
+   rules that may apply to the origin). Then, by type:
    - ready sources: the licence, in the same labels as D1 plus *Internal use only*; for
      collectors, who owns commissioned data
    - untapped holders: the three saleability questions, with the main obstacle and how to buy
@@ -104,8 +113,8 @@ Initial brief → Refine (form with options) → Final brief
    initial one. The scores are then recomputed and the list is ranked again. Licence and
    saleability are screening flags from public pages, not legal advice.
 5. **Email.** In each researched company's panel, pick a contact (verified ones first) and click
-   *Draft email*. The email asks about the deal terms that matter most (D2 to D4, D7, F2 to F4)
-   and never states a price or the budget. The question depends on the type:
+   *Draft email*. The email asks about the deal terms that matter most (D2 permitted use, F1
+   deal terms) and never states a price or the budget. The question depends on the type:
    - ready sources are asked about availability and price, or the licence terms if the data
      is published
    - collectors about recording to spec and who owns the result
