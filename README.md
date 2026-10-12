@@ -137,8 +137,8 @@ Initial brief → Refine (form with options) → Final brief
    no quote becomes *Unclear*, and a saleability answer with no quote falls back to the screen's
    initial one. The scores are then recomputed and the list is ranked again. Licence and
    saleability are screening flags from public pages, not legal advice.
-5. **Compare.** A session has two tabs, *Candidates* (the list above and the research panels) and
-   *Compare*, which works on the researched companies only:
+5. **Compare.** A session has three tabs, *Candidates* (the list above and the research panels),
+   *Outreach* (step 7) and *Compare*, which works on the researched companies only:
    - **Search and pick.** Search by name, type, region, language or what research found they
      hold, and pick up to four (*Top 4* picks the best fits).
    - **Side by side.** One column per company: fit, why it is provisional, fit change and rank
@@ -187,13 +187,34 @@ Initial brief → Refine (form with options) → Final brief
      on why it has value; a direct question about terms if they score 4 or more on *willing*;
      and the way to buy it, if one was found
 
-   Edit the subject and body (edits are saved), then download the draft. Nothing is sent.
+   Edit the subject and body (edits are saved), then download the draft. Nothing is sent: send
+   it from your own mailbox and click *Mark as sent*.
+7. **Outreach.** A search's *Outreach* tab is a board of its researched companies: *To contact,
+   Emailed, Replied, Call scheduled, Negotiating, Won, Dropped*. Drag a company to another stage,
+   or click it for its contacts, the email, a *Log* form (an email sent elsewhere, a reply, a
+   call or a note, with its date and outcome) and the timeline. Marking an email sent moves the
+   company to *Emailed*, a reply to *Replied*, a call to *Call scheduled*; never back. A card
+   turns amber when it was emailed a week ago with no reply. *Outreach so far* lists who was
+   emailed, when, and who replied, as a table and a CSV. The candidate tables gain an
+   *Outreach* column once anything is logged.
+
+**Clients.** Pick the client a search is for, the buyer (*Client* on the form, or above a
+search's results); a search without one has no outreach board. The client is never named in an
+email. *Companies* in the top bar lists the
+clients with what their outreach has come to. A client's page has its metrics (contacted,
+replied, reply rate, calls), the latest activity and a **board of its searches**: *Sourcing,
+Outreach, In talks, Won, Dropped*. A search moves to *Outreach* when an email is sent and to *In
+talks* when someone replies, until you drag it; click one to open it. Outreach belongs to the
+client, so a company another search for the same client finds again keeps its history.
+Searches made before clients existed are under *Searches without a client* on the Companies page.
 
 Every search (and every re-comparison) is a **session** saved under `data/sessions/<time>-<name>/`
-(`session.json`, `brief.json`, `hypotheses.json`, `discovery.json`). The sidebar reopens any
-past session from disk without rerunning. *New session from this brief* opens the form
-prefilled with the brief, so briefs can be reused as templates. Rerunning always creates a new
-session, so old results are never overwritten.
+(`session.json`, `brief.json`, `hypotheses.json`, `discovery.json`). Which one is open is in the
+URL (`?s=<folder>`), so a refresh or a pasted link reopens it from disk without rerunning, as do
+the client's board and the sidebar's recent searches. *New search from this brief* opens the
+form prefilled with the brief, so briefs can be reused as templates. Rerunning always creates a
+new session, so old results are never overwritten. Clients, the boards and outreach are in
+`data/crm.sqlite3` (`worker/crm.py`), apart from the session files a running search rewrites.
 
 **How the search looks** (`worker/discovery/`). Hypotheses are written from the holder's side:
 at least four are organisations that record and keep the data, regulated institutions are
@@ -217,7 +238,20 @@ run in parallel, and each step's time is saved with the session.
 ## Layout
 
 ```
-app.py                  Streamlit UI (searches and research run in a background thread)
+app.py                  Streamlit entry point: the top bar (Search, Companies) and the sidebar
+views/                  the two pages: search.py (a new brief, or a past search by ?s=) and
+                        companies.py (the clients, or one client's page by ?client=)
+ui/
+  brief_form.py         the brief text and the form
+  session_view.py       a search: funnel, candidate lists, researched companies, tabs
+  company_view.py       one researched company: research, contacts, email
+  outreach.py           the Outreach tab: the board, a company's dialog, the outreach table
+  compare_view.py       the Compare tab
+  client_view.py        the Companies page and a client's page with its board of searches
+  board.py              the drag-and-drop board (an inline st.components.v2 component)
+  clients.py            the client picker; nav.py: URL routing and the sidebar
+  jobs.py               searches and research in a background thread
+  labels.py             labels and short texts shared by every view
 worker/
   config.py             model, thinking level, concurrency, budgets, fit weights and caps
   brief_template.py     the brief template as data; the Brief model and Gemini fill schemas
@@ -225,6 +259,7 @@ worker/
   markets.py            the countries and languages a brief names, to search natively
   llm.py                ask(): structured output, retries, optional Google Search
   sessions.py           create, list, save and load session folders
+  crm.py                clients, searches on their boards, deals and outreach activity (SQLite)
   pipeline.py           search() and research(); funnel and CSV exports
   compare.py            preview researched companies under a working brief and kills; save
   scoring.py            coverage, licence and saleability grade, caps, fit, ranking
@@ -247,7 +282,7 @@ eval/
                         organisation and local share of each list's top 20, calls and minutes
   settings.py           runs a brief under model and thinking settings A to D (live, uses quota)
 tests/                  pytest; Gemini is faked and network is blocked
-data/                   sessions and page cache (gitignored)
+data/                   sessions, crm.sqlite3 and page cache (gitignored)
 ```
 
 ## Setup

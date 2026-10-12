@@ -28,6 +28,13 @@ def tmp_sessions(monkeypatch, tmp_path):
     return tmp_path / "sessions"
 
 
+@pytest.fixture(autouse=True)
+def tmp_crm(monkeypatch, tmp_path):
+    """Clients and outreach go to a database in the test's temp folder, never data/crm.sqlite3."""
+    monkeypatch.setattr("worker.crm.CRM_DB", tmp_path / "crm.sqlite3")
+    return tmp_path / "crm.sqlite3"
+
+
 @pytest.fixture
 def fake_ask(monkeypatch) -> FakeAsk:
     """Replace worker.llm.ask for the duration of a test."""

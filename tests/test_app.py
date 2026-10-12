@@ -1,12 +1,12 @@
 """Streamlit page with the Gemini-backed steps stubbed out (no Gemini, no network)."""
 
 import time
-from datetime import date
+from datetime import date, timedelta
 
 from streamlit.testing.v1 import AppTest
 
 from tests.test_hypotheses import BRIEF, brief_with
-from worker import compare, pipeline, sessions
+from worker import compare, crm, pipeline, sessions
 from worker.brief_template import COMMERCIAL, RESTRICTED, UNCLEAR, BriefDraft, Pick
 from worker.discovery import Discovery, Hit
 from worker.schemas import (
@@ -73,6 +73,10 @@ def _fake_search(session, progress=print, **_):
 
 def _button(at, label):
     return next(b for b in at.button if b.label.startswith(label))
+
+
+def _text(at, label):
+    return next(t for t in at.text_input if t.label == label)
 
 
 def _lists(at) -> list:
@@ -178,10 +182,10 @@ def test_reopen_session_research_panel_and_email(monkeypatch):
     at.text_input(key=f"subject-{s.path.name}-otter.ai").input("Licensing meeting recordings").run()
     assert _otter(s.path).email.subject == "Licensing meeting recordings"
 
-    _button(at, "New session from this brief").click().run()
+    _button(at, "New search from this brief").click().run()
     assert next(m for m in at.multiselect if m.label == "Languages and dialects").value == ["English"]
-    assert at.text_input[0].value == "Meeting audio"
-    assert at.text_input[1].value == "multi-speaker meeting audio"
+    assert _text(at, "Session name").value == "Meeting audio"
+    assert _text(at, "What data, in a few words").value == "multi-speaker meeting audio"
 
 
 def test_language_and_volume_filters_and_price_and_age_columns():
@@ -295,7 +299,7 @@ def test_compare_tab_search_kill_edit_the_brief_and_save(monkeypatch):
 
     at = AppTest.from_file("../app.py", default_timeout=30).run()
     next(b for b in at.sidebar.button if b.label.startswith("**Meeting audio**")).click().run()
-    assert [t.label for t in at.tabs] == ["Candidates", "Compare"]
+    assert [t.label for t in at.tabs] == ["Candidates", "Outreach", "Compare"]
 
     def run():  # AppTest sends every tab back as unselected, so select Compare before each run
         at.session_state[f"tab-{key}"] = "Compare"
@@ -379,10 +383,135 @@ def test_compare_tab_search_kill_edit_the_brief_and_save(monkeypatch):
     assert ((s.path / "discovery.json").read_text(), (s.path / "brief.json").read_text()) == on_disk
 
     # the new session opens on its Compare tab, with what changed from the original
-    assert at.session_state.session_path == str(saved_path)
-    assert [t.label for t in at.tabs] == ["Compare", "Candidates"]
+    assert at.query_params["s"] == [saved_path.name]  # the open search is in the URL
+    assert [t.label for t in at.tabs] == ["Compare", "Candidates", "Outreach"]
     assert [(m.label, m.value) for m in at.metric][2] == ("Killed", "1")
     changes = next(df for df in at.dataframe if "Re-scored" in df.value.columns).value
     assert list(changes["Category"]) == ["B2 Languages and dialects", "C1 Volume target", "D1 Acceptable licence"]
     assert list(changes["Re-scored"]) == ["exactly", "judged against the old brief", "exactly"]
     assert not at.exception
+
+
+def _session(name="Meeting audio", **kw):
+    s = sessions.create(name, BRIEF)
+    s.discovery = Discovery(hits=[], candidates=_candidates())
+    s.meta.stage = "done"
+    for k, v in kw.items():
+        setattr(s.meta, k, v)
+    sessions.save(s)
+    return s
+
+
+def test_new_search_for_a_client_goes_on_its_board(monkeypatch):
+    crm.create_client("Otter AI")
+    monkeypatch.setattr(brief_step, "draft_brief", lambda text: BriefDraft(brief=BRIEF))
+    monkeypatch.setattr(pipeline, "search", _fake_search)
+    at = AppTest.from_file("../app.py", default_timeout=30)
+    at.query_params["client"] = "otter-ai"  # from "New search for Otter AI" on the client's page
+    at.run()
+    assert any(c.value == "New search for **Otter AI**" for c in at.caption)
+    _button(at, "Refine brief").click().run()
+    assert at.selectbox(key="brief-client").value == "otter-ai"
+    _button(at, "Save and search").click().run()
+    ((path, _),) = sessions.list_all()
+    assert crm.client_of(path.name) == "otter-ai"
+    assert not at.exception
+
+
+def test_companies_page_client_board_and_unassigned_searches():
+    crm.create_client("Otter AI", note="buys meeting audio")
+    mine = _session("Meeting audio", selected=["otter.ai"])
+    loose = _session("Old search")
+    crm.assign_search(mine.path.name, "otter-ai")
+    crm.log("otter-ai", mine.path.name, "otter.ai", "Otter", "sent", contact="privacy@otter.ai", subject="Hello")
+
+    at = AppTest.from_file("../app.py", default_timeout=30).run()
+    at.switch_page("views/companies.py").run()
+    assert not at.exception
+    assert any(m.value == "#### Otter AI" for m in at.markdown)
+    assert any(m.value == "1 search · 1 contacted · 0 replied" for m in at.markdown)
+    assert any(e.label == "Searches without a client (1)" for e in at.expander)
+    at.selectbox(key=f"assign-{loose.path.name}").set_value("otter-ai").run()
+    assert crm.client_of(loose.path.name) == "otter-ai"
+
+    at.button(key="client-otter-ai").click().run()
+    assert at.query_params["client"] == ["otter-ai"]
+    assert [(m.label, m.value) for m in at.metric] == [
+        ("Searches", "2"), ("Contacted", "1"), ("Replied", "0"), ("Reply rate", "0%"), ("Calls", "0")]
+    activity = next(df for df in at.dataframe if "What" in df.value.columns).value
+    assert list(activity["What"]) == ["✉ Emailed"] and list(activity["Company"]) == ["Otter"]
+    assert list(activity["Search"]) == ["Meeting audio"]
+
+
+def test_search_cards_follow_outreach_until_moved():
+    from ui.client_view import _search_card
+
+    crm.create_client("Otter AI")
+    s = _session(selected=["otter.ai"])
+    crm.assign_search(s.path.name, "otter-ai")
+    crm.log("otter-ai", s.path.name, "otter.ai", "Otter", "sent", crm.now() - timedelta(days=9))
+    (p,) = crm.placements("otter-ai")
+    found = crm.deals("otter-ai", session=s.path.name)
+    card = _search_card(s.path.name, s.meta, crm.search_stage(p, found), found)
+    assert (card.column, card.chip, card.tone) == ("Outreach", "✉ 9 days ago", "warn")  # a follow-up is due
+    assert card.lines == [f"Created {s.meta.created:%d %b %Y}", "2 relevant · 1 researched", "1 emailed · 0 replied"]
+
+
+def test_outreach_tab_board_dialog_mark_sent_and_log_a_reply(monkeypatch):
+    from ui.outreach import _card
+
+    crm.create_client("Otter AI")
+    s = _session()
+    key = s.path.name
+    monkeypatch.setattr(email_step, "draft_email", lambda brief, c, contact: EmailDraft(
+        to=contact.email, subject="Meeting recordings", body="Dear team, ..."))
+
+    at = AppTest.from_file("../app.py", default_timeout=30)
+    at.query_params["s"] = key
+    at.run()
+
+    def run():  # AppTest sends every tab back as unselected, so select Outreach before each run
+        at.session_state[f"tab-{key}"] = "Outreach"
+        at.run()
+
+    run()
+    assert any("Put this search on a client's board" in i.value for i in at.info)
+    at.selectbox(key=f"client-{key}").set_value("otter-ai")
+    run()
+    assert crm.client_of(key) == "otter-ai"
+    assert at.selectbox(key=f"search-stage-{key}-Sourcing").value == "Sourcing"
+
+    at.selectbox(key=f"deal-pick-{key}").set_value("otter.ai")  # opens the company's dialog
+    run()
+    assert not at.exception
+    assert any(h.value == "Otter" for h in at.subheader)
+    _button(at, "Draft email").click()
+    run()
+    assert [d.stage for d in crm.deals("otter-ai")] == ["To contact"]  # drafting puts it on the board
+    _button(at, "Mark as sent").click()
+    run()
+    (deal,) = crm.deals("otter-ai")
+    assert (deal.stage, deal.sent, deal.last_contact) == ("Emailed", 1, "privacy@otter.ai")
+    assert crm.timeline(deal.id)[0].subject == "Meeting recordings"
+    table = next(df for df in at.dataframe if "Emails sent" in df.value.columns).value
+    assert list(table["Stage"]) == ["Emailed"] and list(table["Emailed"]) == ["privacy@otter.ai"]
+
+    form = next(r for r in at.radio if r.label == "What happened")
+    form.set_value("reply")
+    next(t for t in at.text_area if t.label == "Text").input("Happy to talk licensing")
+    next(sb for sb in at.selectbox if sb.label == "Outcome").set_value("interested")
+    next(b for b in at.button if b.label == "Log").click()
+    run()
+    assert not at.exception
+    (deal,) = crm.deals("otter-ai")
+    assert deal.stage == "Replied" and deal.replies == 1
+    assert crm.timeline(deal.id)[0].body == "Happy to talk licensing"
+    assert at.selectbox(key=f"search-stage-{key}-In talks").value == "In talks"  # the search follows
+
+    card = _card(next(c for c in sessions.load(s.path).discovery.candidates if c.domain == "otter.ai"), deal, s)
+    assert (card.column, card.chip, card.tone) == ("Replied", "↩ Replied today", "good")
+
+    at.session_state[f"tab-{key}"] = "Candidates"
+    at.run()
+    untapped = _lists(at)[0]
+    assert list(untapped["Outreach"]) == ["Replied · today"]
