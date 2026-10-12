@@ -75,7 +75,16 @@ def _button(at, label):
     return next(b for b in at.button if b.label.startswith(label))
 
 
-def test_brief_form_search_and_one_ranked_table(monkeypatch):
+def _lists(at) -> list:
+    """The candidate tables in page order: untapped holders, ready sources, then excluded ones."""
+    return [df.value for df in at.dataframe if "Reason" in df.value.columns]
+
+
+def _companies(at) -> list[str]:
+    return [name for df in _lists(at) for name in df["Company"]]
+
+
+def test_brief_form_search_and_two_ranked_lists(monkeypatch):
     draft = BriefDraft(brief=brief_with(region=Pick(values=["Middle East (GCC)"], source="inferred"),
                                         processing=Pick(values=["UK"])),
                        questions=["Do accented speakers count?"])
@@ -108,21 +117,24 @@ def test_brief_form_search_and_one_ranked_table(monkeypatch):
 
     assert not at.exception
     assert [(m.label, m.value) for m in at.metric] == [
-        ("Found", "6"), ("Unique", "5"), ("Screened", "4"), ("Relevant", "2"), ("Researched", "1"),
-        ("With contacts", "1"),
+        ("Found", "6"), ("Unique", "5"), ("Screened", "4"), ("Untapped", "1"), ("Ready", "1"), ("Confirmed", "0"),
+        ("Researched", "1"), ("With contacts", "1"),
     ]
     assert "Multi-speaker meeting audio" in at.info[0].value  # the saved brief's summary
-    (table,) = [df for df in at.dataframe if "Reason" in df.value.columns]  # the candidates, not the comparison
-    # one table by fit: below-threshold and excluded hidden, unknown fit last
+    # two lists, never ranked against each other; below-threshold and excluded hidden
     # fits are recomputed on load: Otter's consent obstacle doesn't cap it, and EgoData shows no
     # evidence for the brief's language
-    assert list(table.value["Company"]) == ["Otter", "EgoData"]  # Down: not screened, hidden
-    assert list(table.value["Fit"]) == ["3.9", "3.6"]  # Otter: English, but no Gulf evidence
+    untapped, ready = _lists(at)  # Down: not screened, hidden
+    assert [m.value for m in at.markdown if m.value.startswith("**") and "(" in m.value][:2] == [
+        "**Untapped holders** (1)", "**Ready sources** (1)"]
+    assert (list(untapped["Company"]), list(ready["Company"])) == (["Otter"], ["EgoData"])
+    assert (list(untapped["Fit"]), list(ready["Fit"])) == (["3.9"], ["3.6"])  # Otter: English, but no Gulf evidence
     # Otter: exists 5 and allowed 2 verified by research, willing 3 still the screen's
-    assert list(table.value["Saleability"])[:2] == ["Low (initial)", "prior: offered, licence not checked"]
-    assert list(table.value["Type"])[:2] == ["Untapped", "Ready source"]
-    assert list(table.value["Obstacle → how to buy"])[:2] == [
-        "customers own the recordings → needs its customers' consent", ""]
+    assert list(untapped["Saleability"]) == ["Low (initial)"]
+    assert list(ready["Saleability"]) == ["prior: offered, licence not checked"]
+    assert "Trigger" in untapped.columns and "Trigger" not in ready.columns  # big or regulated holders only
+    assert list(untapped["Verdict"]) == [""]  # not confirmed: the search found nothing to check
+    assert list(untapped["Obstacle → how to buy"]) == ["customers own the recordings → needs its customers' consent"]
     research = _button(at, "Research selected")
     assert research.label == "Research selected (0)" and research.disabled
     assert any("not legal advice" in c.value for c in at.caption)
@@ -186,27 +198,61 @@ def test_language_and_volume_filters_and_price_and_age_columns():
     at = AppTest.from_file("../app.py", default_timeout=30).run()
     next(b for b in at.sidebar.button if b.label.startswith("**Meeting audio**")).click().run()
 
-    def table():
-        return next(df for df in at.dataframe if "Fit" in df.value.columns).value
-
-    assert list(table()["Company"]) == ["Otter", "EgoData"]
-    assert list(table()["Price"]) == ["?", "$30 per audio hour"]
-    assert list(table()["Founded"])[0] == f"2016 ({date.today().year - 2016} years)"
+    assert _companies(at) == ["Otter", "EgoData"]
+    untapped, ready = _lists(at)
+    assert (list(untapped["Price"]), list(ready["Price"])) == (["?"], ["$30 per audio hour"])
+    assert list(untapped["Founded"]) == [f"2016 ({date.today().year - 2016} years)"]
 
     at.multiselect(key=f"languages-{key}").set_value(["English"]).run()
-    assert list(table()["Company"]) == ["Otter"]  # the only one with evidence for English
+    assert _companies(at) == ["Otter"]  # the only one with evidence for English
+    assert any(c.value == "None match these filters." for c in at.caption)  # the ready list is empty
     at.multiselect(key=f"languages-{key}").set_value([]).run()
 
     at.select_slider(key=f"volume-{key}").set_value(4).run()
-    assert list(table()["Company"]) == ["Otter", "EgoData"]  # unknown volume still shown
+    assert _companies(at) == ["Otter", "EgoData"]  # unknown volume still shown
     at.toggle(key=f"unknown-volume-{key}").set_value(True).run()
-    assert list(table()["Company"]) == ["Otter"]
+    assert _companies(at) == ["Otter"]
     at.toggle(key=f"unknown-volume-{key}").set_value(False).run()
 
     at.toggle(key=f"excluded-{key}").set_value(True).run()  # not screened and excluded companies
-    shown = table()
-    assert list(shown["Company"]) == ["Otter", "EgoData", "Down", "Payroll Co"]
-    assert list(shown["Type"])[2:] == ["Not screened", "Excluded"]
+    assert _companies(at) == ["Otter", "EgoData", "Down", "Payroll Co"]
+    assert list(_lists(at)[2]["Type"]) == ["Not screened", "Excluded"]  # a list of their own
+    assert not at.exception
+
+
+def test_confirmed_and_possible_only_once_the_search_confirmed_some():
+    from worker.schemas import Blocker, Confirmation, Trigger
+
+    cands = _candidates()
+    quote = [Evidence(quote="Otter records and transcribes meetings", url="https://otter.ai")]
+    cands[1].confirmation = Confirmation(verdict="possible", reason="Fits; no sign yet that it would sell",
+                                         data_evidence=quote, data_owner="company", owner_evidence=quote)
+    cands.append(Candidate(name="Bank", website="https://bank.example", domain="bank.example", channels=["distressed"],
+                           source_urls=[], reason="retail bank", holder_type="untapped", data_owner="company",
+                           needs_trigger=True, languages=["English"], scores=Scores(data_match=5), fit=4.5,
+                           triggers=[Trigger(kind="distress", date="2025", summary="in administration")],
+                           confirmation=Confirmation(verdict="rejected", reason="Says it never shares recordings",
+                                                     data_evidence=quote, blockers=[Blocker(
+                                                         kind="never_share", summary="Says it never shares recordings",
+                                                         evidence=quote)])))
+    s = sessions.create("Verdicts", BRIEF)
+    s.discovery = Discovery(hits=[], candidates=cands)
+    s.meta.stage = "done"
+    sessions.save(s)
+
+    at = AppTest.from_file("../app.py", default_timeout=30).run()
+    next(b for b in at.sidebar.button if b.label.startswith("**Verdicts**")).click().run()
+    (untapped,) = _lists(at)
+    assert list(untapped["Company"]) == ["Otter"] and list(untapped["Verdict"]) == ["🟡 Possible"]
+    assert list(untapped["Reason"]) == ["Fits; no sign yet that it would sell"]
+    # the ready list has no verdicts yet: unchecked companies wait for "Unchecked and rejected"
+    assert any(m.value == "**Ready sources** (0)" for m in at.markdown)
+    assert any(c.value.startswith("Showing confirmed and possible companies") for c in at.caption)
+    at.toggle(key=f"unchecked-{s.path.name}").set_value(True).run()
+    untapped = _lists(at)[0]
+    assert list(untapped["Company"]) == ["Otter", "Bank"]  # rejected last, whatever its fit
+    assert untapped.set_index("Company").loc["Bank", "Trigger"] == "Distress 2025: in administration"
+    assert any("**Bank** — ❌ Rejected: Says it never shares recordings" in m.value for m in at.markdown)
     assert not at.exception
 
 
@@ -263,8 +309,13 @@ def test_compare_tab_search_kill_edit_the_brief_and_save(monkeypatch):
                     or "Rank" in df.value.index).value
 
     picker = at.multiselect(key=f"cmp-{key}-pick")
-    assert picker.value == ["otter.ai", "egodata.example"]  # researched only, best fit first
-    assert list(compared().columns) == ["Otter", "EgoData"]
+    assert picker.value == ["otter.ai"]  # researched only, one type at a time, best fit first
+    assert at.radio(key=f"cmp-{key}-type").options == ["Untapped holders", "Ready sources"]
+    assert list(compared().columns) == ["Otter"]
+    at.radio(key=f"cmp-{key}-type").set_value("ready")
+    run()
+    assert at.multiselect(key=f"cmp-{key}-pick").value == ["egodata.example"]
+    assert list(compared().columns) == ["EgoData"]  # ready sources are never compared with holders
     assert compared().loc["Licence found", "EgoData"] == RESTRICTED
     assert compared().loc["Must-haves not met", "EgoData"] == "Acceptable licence"
     assert compared().loc["Fit", "EgoData"] == "2.0"  # research-only licence; D1 is commercial, must
@@ -275,9 +326,9 @@ def test_compare_tab_search_kill_edit_the_brief_and_save(monkeypatch):
     run()
     assert at.multiselect(key=f"cmp-{key}-pick").options == ["EgoData · Ready source"]
     assert any(c.value.startswith("Pick companies above") for c in at.caption)
-    at.button(key=next(b.key for b in at.button if b.label == "Top 4")).click()
+    _button(at, "Top 4").click()
     run()
-    assert at.multiselect(key=f"cmp-{key}-pick").value == ["otter.ai", "egodata.example"]
+    assert at.multiselect(key=f"cmp-{key}-pick").value == ["egodata.example"]  # the best of this type
 
     # relax the licence in the working brief: exact, so not provisional
     form = f"cmp-{key}-form-0"
@@ -285,7 +336,7 @@ def test_compare_tab_search_kill_edit_the_brief_and_save(monkeypatch):
     run()
     assert not at.exception
     assert compared().loc["Fit", "EgoData"] != "2.0" and "*" not in compared().loc["Fit", "EgoData"]
-    assert compared().loc["Fit", "EgoData"] == "3.9" and compared().loc["Rank", "EgoData"] == "#2"
+    assert compared().loc["Fit", "EgoData"] == "3.9" and compared().loc["Rank", "EgoData"] == "#1"  # among sellers
     assert any("Unsaved changes" in w.value for w in at.warning)
 
     # change the volume target: judged by Gemini, so EgoData's fit becomes provisional
@@ -299,19 +350,24 @@ def test_compare_tab_search_kill_edit_the_brief_and_save(monkeypatch):
     at.button(key=f"{form}-languages-remove").click()
     run()
     assert not at.exception and at.session_state[f"cmp-{key}-version"] == 1
+    at.radio(key=f"cmp-{key}-type").set_value("untapped")
+    run()
     at.text_input(key=f"cmp-{key}-why-otter.ai").input("customers own the recordings")
     run()
     at.button(key=f"cmp-{key}-kill-ok-otter.ai").click()
     run()
     assert not at.exception
+    assert not [r for r in at.radio if r.key == f"cmp-{key}-type"]  # one type left: nothing to switch
+    _button(at, "Top 4").click()
+    run()
     assert list(compared().columns) == ["EgoData"]
-    assert compared().loc["Rank", "EgoData"] == "#2 → #1"  # Otter is out of the running
+    assert compared().loc["Rank", "EgoData"] == "#1"  # Otter was never in its running
     assert any(m.value == "**Otter** — customers own the recordings" for m in at.markdown)
     assert ((s.path / "discovery.json").read_text(), (s.path / "brief.json").read_text()) == on_disk  # preview only
 
     at.text_input(key=f"cmp-{key}-name").input("Meeting audio, relaxed")
     run()
-    at.button(key=next(b.key for b in at.button if b.label == "Save")).click()
+    next(b for b in at.button if b.label == "Save").click()
     run()
     assert not at.exception
     ((saved_path, meta),) = [(p, m) for p, m in sessions.list_all() if m.parent]

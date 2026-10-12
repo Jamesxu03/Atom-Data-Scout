@@ -3,8 +3,14 @@ import pytest
 
 from tests.test_hypotheses import BRIEF, brief_with
 from worker.brief_template import CUSTOMER_EXCLUDE, READY, Pick
-from worker.config import MUST_HAVE_CAP, NOT_SELLABLE_CAP, SCREEN_BATCH_SIZE
-from worker.schemas import Candidate
+from worker.config import (
+    MUST_HAVE_CAP,
+    NOT_SELLABLE_CAP,
+    SCREEN_BATCH_SIZE,
+    THIN_PAGE_TEXT_CHARS,
+    TRIGGER_CAP,
+)
+from worker.schemas import Candidate, Confirmation, SellingSignal
 from worker.scoring import is_relevant, rank
 from worker.steps.screen import NO_HOMEPAGE, ScreenBatch, ScreenItem, Stated, screen, source_excerpt
 
@@ -130,19 +136,27 @@ def test_only_unscreened_candidates_are_screened(fake_ask):
     assert done.reason == "screened earlier" and new.scores.data_match == 5
 
 
-def test_rank_by_fit_then_corroboration():
-    def scored(domain, fit, channels=("product_search",), excluded=False):
+def test_rank_by_verdict_then_fit_then_selling_signals():
+    def scored(domain, fit, channels=("product_search",), excluded=False, verdict=None, signals=0):
         c = _cand(domain)
         c.reason, c.fit, c.channels, c.excluded = "r", fit, list(channels), excluded
+        if verdict:
+            c.confirmation = Confirmation(verdict=verdict, reason="r", signals=[
+                SellingSignal(kind="own_data", summary="s", evidence=[]) for _ in range(signals)])
         return c
 
     famous = scored("famous.com", 3.5, ["product_search", "directory", "snowball"])
-    niche = scored("niche.com", 3.5)
+    niche = scored("niche.com", 3.5, verdict="unconfirmed", signals=1)
     vendor = scored("vendor.com", 4.6, ["marketplace"])
     unknown = scored("unknown.com", None, ["product_search", "directory", "snowball", "marketplace"])
     dropped = scored("dropped.com", 4.9, excluded=True)
-    order = [c.domain for c in rank([unknown, niche, dropped, famous, vendor])]
-    assert order == ["vendor.com", "famous.com", "niche.com", "unknown.com", "dropped.com"]
+    confirmed = scored("confirmed.com", 3.0, verdict="confirmed")
+    possible = scored("possible.com", 2.8, verdict="possible")
+    rejected = scored("rejected.com", 4.8, verdict="rejected")
+    order = [c.domain for c in rank([unknown, niche, dropped, famous, vendor, confirmed, possible, rejected])]
+    # corroboration no longer breaks the tie: niche's verified selling signal does
+    assert order == ["confirmed.com", "possible.com", "vendor.com", "niche.com", "famous.com", "unknown.com",
+                     "rejected.com", "dropped.com"]
 
 
 def test_tool_maker_without_the_data_is_not_sellable(fake_ask):
@@ -364,3 +378,39 @@ def test_blocked_homepage_is_judged_from_the_page_it_was_found_on(fake_ask):
                            "and no other page about it was found")
     (call,) = fake_ask.calls
     assert NO_HOMEPAGE in call.prompt and "good-lost.com" not in call.prompt
+
+
+def test_big_or_regulated_is_flagged_not_scored_unwilling_and_names_its_archetype(fake_ask):
+    def answer(prompt):
+        return ScreenBatch(results=[ScreenItem(
+            domain="bank.com", holder_type="untapped", data_owner="company", data_match=4, languages=["English"],
+            regions=[], volume_signal=None, reason="retail bank", exists=5, allowed=None, willing=None,
+            needs_trigger=True, archetype="kept_by_law")])
+
+    fake_ask.responses[ScreenBatch] = answer
+    bank = _cand("bank.com")
+    screen(BRIEF, [bank], fetch=lambda _: "We record calls " * 50, progress=lambda _: None, source=lambda _: None)
+    assert (bank.needs_trigger, bank.archetype, bank.fit) == (True, "kept_by_law", TRIGGER_CAP)
+    prompt = fake_ask.calls[0].prompt
+    assert "Being a big brand or\n  regulated is not a reason for 1: set needs_trigger instead." in prompt
+    assert "recordings kept for financial regulation" not in prompt
+    assert "- kept_by_law: Kept by law" in prompt and "copy\nquotes in the page's own language" in prompt
+
+
+def test_thin_homepages_are_rendered_and_sent_with_more_room(fake_ask):
+    fake_ask.responses[ScreenBatch] = _score_by_prefix
+    thin, full = _cand("good-thin.com"), _cand("good-full.com")
+    pages = {"https://good-thin.com": "Loading...", "https://good-full.com": "Full homepage text. " * 100}
+    rendered = []
+
+    def render(url):
+        rendered.append(url)
+        return "Rendered text of a JavaScript site. " * 150
+
+    screen(BRIEF, [thin, full], fetch=pages.__getitem__, progress=lambda _: None, source=lambda _: None,
+           render=render)
+    assert rendered == ["https://good-thin.com"]  # the full page needs no browser
+    (call,) = fake_ask.calls
+    thin_part = call.prompt.split("### good-thin.com")[1].split("###")[0]
+    assert thin_part.count("Rendered text") > THIN_PAGE_TEXT_CHARS // 40  # more room than a normal page
+    assert "Loading..." not in thin_part

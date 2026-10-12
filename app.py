@@ -1,13 +1,15 @@
 """Streamlit UI. Run: uv run streamlit run app.py
 
-Brief -> Refine (form) -> Save and search -> one list ranked by fit -> tick rows -> Research
-selected -> Compare tab: search the researched companies, side by side, under a working brief
+Brief -> Refine (form) -> Save and search -> two lists, untapped holders and ready sources, each
+ranked by verdict and fit (shown while the best are confirmed) -> tick rows -> Research selected
+-> Compare tab: search the researched companies of one type, side by side, under a working brief
 and kills, saved as a new session -> draft an email per company. Each search is a session folder (worker/sessions.py),
 and every page reads it from disk, so any past session reopens without rerunning and a browser
 refresh loses nothing.
 
 Searches and research run in a background thread, so touching the page doesn't restart or
-interrupt them; a fragment polls for progress once a second.
+interrupt them; a fragment polls for progress once a second, and reruns the page when a search
+that is confirming saves new verdicts.
 """
 
 import re
@@ -34,8 +36,8 @@ from worker.brief_template import (
     transfer_flags,
 )
 from worker.config import RELEVANT_FIT
-from worker.schemas import Candidate, CheckedCategory, Contact, Evidence
-from worker.scoring import answers, is_verified, must_failures, saleability_label
+from worker.schemas import Candidate, CheckedCategory, Confirmation, Contact, Evidence
+from worker.scoring import answers, is_verified, must_failures, saleability_label, split, verdict
 from worker.steps import brief as brief_step
 from worker.steps import email as email_step
 
@@ -46,6 +48,10 @@ EXAMPLE_BRIEF = (
 LOGO = "assets/atom_logo.png"
 ICON = "assets/atom_icon.png"  # square: a wide logo gets squeezed into the browser tab's favicon
 HOLDER_LABELS = {"ready": "Ready source", "untapped": "Untapped", None: "Not screened"}
+LIST_TITLES = {"untapped": "Untapped holders", "ready": "Ready sources", None: "Excluded and not screened"}
+VERDICT_LABELS = {"confirmed": "✅ Confirmed", "possible": "🟡 Possible", "unconfirmed": "❔ Unconfirmed",
+                  "rejected": "❌ Rejected", None: ""}
+TRIGGER_LABELS = {"distress": "Distress", "precedent": "Past data deal", "law": "Law"}
 QUESTION_LABELS = {"exists": "Exists?", "allowed": "Allowed?", "willing": "Willing?"}
 VERDICT_ICONS = {"meets": "✅", "fails": "❌", "unclear": "❔"}
 LEGAL_NOTE = "Licence status is a screening flag from public pages, not legal advice."
@@ -64,6 +70,10 @@ class Job:
     done: bool = False
     started: float = field(default_factory=time.time)
     finished: float | None = None
+    version: int = 0  # bumped each time the job saves the session
+
+    def bump(self) -> None:
+        self.version += 1
 
     @property
     def elapsed(self) -> int:
@@ -79,14 +89,15 @@ def busy() -> bool:
     return job is not None and not job.done
 
 
-def start_job(kind: str, path: str, work: Callable[[Callable[[str], None]], None]) -> None:
+def start_job(kind: str, path: str, work: Callable[[Job], None]) -> None:
+    """Run work(job) in a background thread; it reports through job.messages and job.bump."""
     if busy():
         return
     job = Job(kind=kind, session_path=path)
 
     def run():
         try:
-            work(job.messages.append)
+            work(job)
         except Exception as e:
             job.error = f"{type(e).__name__}: {e}"
             s = sessions.load(path)  # keep what was saved, and say why it stopped
@@ -103,12 +114,13 @@ def start_job(kind: str, path: str, work: Callable[[Callable[[str], None]], None
 
 
 def start_search(path: str) -> None:
-    start_job("search", path, lambda progress: pipeline.search(sessions.load(path), progress=progress))
+    start_job("search", path,
+              lambda job: pipeline.search(sessions.load(path), progress=job.messages.append, on_update=job.bump))
 
 
 def start_research(path: str, domains: list[str]) -> None:
     start_job("research", path,
-              lambda progress: pipeline.research(sessions.load(path), domains, progress=progress))
+              lambda job: pipeline.research(sessions.load(path), domains, progress=job.messages.append))
 
 
 # --- navigation -------------------------------------------------------------------------------
@@ -311,6 +323,12 @@ def progress_panel(path: str) -> None:
         with st.status(f"Running {job.kind}… {job.elapsed}s", expanded=True):
             for m in job.messages[-12:]:
                 st.write(m)
+        # the list shows while the best companies are confirmed: rerun when a verdict is saved
+        seen = st.session_state.get("seen_version")
+        if job.kind == "search" and job.version != seen and (meta := sessions.load_meta(path)) \
+                and meta.stage == "confirming":
+            st.session_state.seen_version = job.version
+            st.rerun()
         return
     if st.session_state.get("rendered_job") is not job:
         st.session_state.rendered_job = job
@@ -337,8 +355,11 @@ def session_page(path: str) -> None:
     st.fragment(progress_panel, run_every=1 if job_here else None)(path)
 
     if job_here and job.kind == "search":
-        st.caption("Searching — results appear here when done.")
-        return
+        if s.meta.stage != "confirming":
+            st.caption("Searching — results appear here when done.")
+            return
+        st.info("The lists are ready. The best companies of each are being confirmed: verdicts appear as they "
+                "arrive, and the default view fills in with confirmed and possible ones.")
     if s.meta.stage == "searching" and not job_here:
         st.warning("This search didn't finish (the app stopped). Showing what was saved.")
     elif s.meta.stage == "partial":
@@ -363,13 +384,25 @@ def session_page(path: str) -> None:
         cols[2].metric("Killed", sum(c.killed for c in s.discovery.candidates))
         cols[3].metric("With contacts", f.with_contacts, help="Researched companies with a verified contact")
     else:
-        cols = st.columns(6)
+        cols = st.columns(8)
         cols[0].metric("Found", f.found, help="Raw hits across all discovery channels")
         cols[1].metric("Unique", f.unique, help="Unique domains")
         cols[2].metric("Screened", f.screened, help="Homepage read and scored")
-        cols[3].metric("Relevant", f.relevant, help=f"Fit of at least {RELEVANT_FIT}, not killed")
-        cols[4].metric("Researched", f.researched)
-        cols[5].metric("With contacts", f.with_contacts, help="Researched companies with a verified contact")
+        cols[3].metric("Untapped", f.relevant_untapped, help=f"Untapped holders with a fit of at least {RELEVANT_FIT}")
+        cols[4].metric("Ready", f.relevant_ready, help=f"Ready sources with a fit of at least {RELEVANT_FIT}")
+        cols[5].metric("Confirmed", f.confirmed, help=f"Confirmed fit and saleability, with quotes. "
+                                                      f"{f.possible} more possible")
+        cols[6].metric("Researched", f.researched)
+        cols[7].metric("With contacts", f.with_contacts, help="Researched companies with a verified contact")
+        if f.rounds:
+            with st.expander(f"Discovery rounds ({len(f.rounds)})"):
+                st.dataframe(pd.DataFrame([
+                    {"Round": r.round, "Searches": r.calls, "Google queries": r.queries or "?", "Results": r.hits,
+                     "New companies": r.new, "Qualifying": r.qualifying}
+                    for r in f.rounds
+                ]), hide_index=True)
+                st.caption("Qualifying: new, a fit, meets every must-have and isn't a tool vendor. A round adding "
+                           "too few of them stops the search; the last row is the snowball and vendors' customers.")
 
     labels = ["Compare", "Candidates"] if s.meta.parent else ["Candidates", "Compare"]
     tabs = dict(zip(labels, st.tabs(labels, key=f"tab-{Path(path).name}", on_change="rerun"), strict=True))
@@ -405,19 +438,28 @@ def lineage(s: sessions.Session) -> None:
                        "scores.")
 
 
+def confirmation_text(c: Candidate) -> str:
+    return VERDICT_LABELS[verdict(c)]
+
+
+def trigger_text(c: Candidate) -> str:
+    """Untapped holders: the verified triggers, or why a big or regulated one is capped."""
+    if c.triggers:
+        return "; ".join(f"{TRIGGER_LABELS[t.kind]} {t.date}: {t.summary}" for t in c.triggers)
+    if c.needs_trigger:
+        return "Big or regulated: no trigger found" if c.trigger_checked else "Big or regulated: not checked yet"
+    return ""
+
+
 def candidates_table(s: sessions.Session, path: str) -> None:
+    """Untapped holders and ready sources as two tables, never ranked against each other, with
+    shared filters. Once the search has confirmed some companies, each table shows only the
+    confirmed and possible ones unless "Unchecked and rejected" is on."""
     st.subheader("Candidates")
     key = Path(path).name
     left, mid, right = st.columns([2, 3, 1])
     min_fit = left.slider("Minimum fit", 1.0, 5.0, RELEVANT_FIT, 0.5, key=f"fit-{key}",
                           help="Companies that couldn't be screened (no readable page) show with Show excluded")
-    present = list(dict.fromkeys(c.holder_type for c in s.discovery.candidates if not c.excluded))
-    types = mid.multiselect("Type", present, default=present, format_func=HOLDER_LABELS.get, key=f"types-{key}")
-    show_excluded = right.toggle("Show excluded", key=f"excluded-{key}",
-                                 help="Unrelated companies, dead websites, ones a must-have filter rules out, ones "
-                                      "you killed, and "
-                                      "ones not screened because their site blocks automated access and no other "
-                                      "page about them was found (the Reason column says why)")
     min_volume = left.select_slider(
         "Minimum volume", [1, 2, 3, 4, 5], 1, key=f"volume-{key}",
         format_func=lambda v: "Any" if v == 1 else f"{v} or more",
@@ -425,6 +467,15 @@ def candidates_table(s: sessions.Session, path: str) -> None:
     languages = mid.multiselect(
         "Languages", s.brief.languages, key=f"languages-{key}", placeholder="Any",
         help="Only companies with evidence for at least one of these") if s.brief.languages else []
+    confirmed_any = any(c.confirmation for c in s.discovery.candidates)
+    show_all = mid.toggle("Unchecked and rejected", key=f"unchecked-{key}", disabled=not confirmed_any,
+                          help="By default only companies confirmed (or possibly) to fit and to be able to sell "
+                               "are shown, once the search has checked them. This shows the rest, with why.")
+    show_excluded = right.toggle("Show excluded", key=f"excluded-{key}",
+                                 help="Unrelated companies, dead websites, ones a must-have filter rules out, ones "
+                                      "you killed, and "
+                                      "ones not screened because their site blocks automated access and no other "
+                                      "page about them was found (the Reason column says why)")
     hide_unknown = right.toggle("Known volume", key=f"unknown-volume-{key}",
                                 help="Only companies whose volume is known. Most stay unknown until researched.")
     show_vendors = right.toggle("Tool vendors", key=f"vendors-{key}",
@@ -437,32 +488,58 @@ def candidates_table(s: sessions.Session, path: str) -> None:
         if c.vendor:
             if not show_vendors:
                 return False
-        elif c.fit is not None and c.fit < min_fit:
+        elif c.fit < min_fit:
+            return False
+        if confirmed_any and not show_all and verdict(c) not in ("confirmed", "possible"):
             return False
         volume = c.scores.volume
-        return (c.holder_type in types
-                and (not languages or any(lang in c.languages for lang in languages))
+        return ((not languages or any(lang in c.languages for lang in languages))
                 and (volume >= min_volume if volume is not None else not hide_unknown))
 
-    rows = [c for c in s.discovery.candidates if shown(c)]
-    if not rows:
-        st.caption("No candidates match these filters.")
-        return
+    selected = []
+    for side, cands in split(s.discovery.candidates).items():
+        rows = [c for c in cands if shown(c)]
+        if side is None and not rows:
+            continue
+        st.markdown(f"**{LIST_TITLES[side]}** ({len(rows)})")
+        if not rows:
+            st.caption("None match these filters." if cands else "None found.")
+            continue
+        selected += candidate_rows(s, rows, side, f"table-{key}-{side}")
+    if confirmed_any and not show_all:
+        st.caption("Showing confirmed and possible companies. Turn on *Unchecked and rejected* for the rest.")
+    st.button(
+        f"Research selected ({len(selected)})", type="primary", disabled=busy() or not selected,
+        on_click=start_research, args=(path, selected),
+        help="Tick rows in the tables first. Two Gemini calls per company (research and contacts).",
+    )
+    st.caption(LEGAL_NOTE)
+    st.download_button("Download candidates CSV", pipeline.candidates_csv(s.discovery.candidates, s.brief),
+                       "candidates.csv", "text/csv")
+    verdict_details(s)
+
+
+def candidate_rows(s: sessions.Session, rows: list[Candidate], side: str | None, key: str) -> list[str]:
+    """One list's table; returns the domains ticked in it."""
+    untapped = side == "untapped"
     event = st.dataframe(
         pd.DataFrame([
             {
                 "Fit": fmt(c.fit),
+                "Verdict": confirmation_text(c),
                 "Company": c.name,
                 "Type": type_label(c),
                 "Saleability": saleability_label(c, s.brief),
+                **({"Trigger": trigger_text(c)} if untapped else {}),
                 "Data match": fmt(c.scores.data_match),
                 "Coverage": fmt(c.scores.coverage),
                 "Volume": fmt(c.scores.volume),
                 **{label: fact_text(c, k) for k, label in FACT_LABELS.items()},
                 "Languages and regions": ", ".join(c.languages + c.regions),
-                "Reason": kill_text(c) if c.killed else c.reason,
+                "Reason": kill_text(c) if c.killed else (c.confirmation.reason if c.confirmation else c.reason),
                 "Obstacle → how to buy": obstacle_text(c),
                 "Must-haves not met": ", ".join(CATEGORIES[k].label for k in must_failures(c, s.brief)),
+                "Found via": ", ".join([f"customer of {t}" for t in c.tools] + c.markets),
                 "Website": c.website,
                 "Found on": c.source_urls[0] if c.source_urls else None,
                 "Source checked": c.source_verified,
@@ -473,14 +550,22 @@ def candidates_table(s: sessions.Session, path: str) -> None:
         width="stretch",
         on_select="rerun",
         selection_mode="multi-row",
-        key=f"table-{key}",
+        key=key,
         column_config={
             "Fit": st.column_config.TextColumn(help="1 to 5: weighted mean of the known scores, after caps"),
+            "Verdict": st.column_config.TextColumn(
+                help="Confirmed: its own pages show it fits the must-haves and it can sell (owns the data and shows "
+                     "a sign it would, or a licence the brief accepts). Possible: fits, saleability unclear. "
+                     "Unconfirmed: the fit isn't shown. Rejected: a must-have contradicted or a blocker. Empty: "
+                     "not checked. " + LEGAL_NOTE),
             "Saleability": st.column_config.TextColumn(
                 help="Ready sources: the licence (prior until research checks it). Untapped: the lowest of three "
                      "answers (exists, allowed, willing): High, Medium, Low or Not sellable; initial from the "
                      "homepage, verified once research finds quotes. Only verified answers on exists or allowed cap "
                      "the fit; initial ones count in the licence score. " + LEGAL_NOTE),
+            "Trigger": st.column_config.TextColumn(
+                help="Big brands and regulated institutions count only after something changed: distress, a past "
+                     "data deal or a law allowing reuse, dated and quoted. Until then their fit is capped at 2.0."),
             "Obstacle → how to buy": st.column_config.TextColumn(
                 help="Untapped holders: what stands in the way, and how it could still be bought"),
             "Coverage": st.column_config.TextColumn(help="Evidence for the brief's languages and regions"),
@@ -489,21 +574,36 @@ def candidates_table(s: sessions.Session, path: str) -> None:
             "Founded": st.column_config.TextColumn(help=f"Year the company was founded, and its age. {FACT_HELP}"),
             "Must-haves not met": st.column_config.TextColumn(
                 help="Must-have categories the evidence contradicts; each caps the fit"),
+            "Found via": st.column_config.TextColumn(
+                help="The tool whose customer stories named it, and the local markets whose searches found it"),
             "Website": st.column_config.LinkColumn(),
             "Found on": st.column_config.LinkColumn(),
             "Source checked": st.column_config.CheckboxColumn(
                 help="The source page was confirmed to list this company"),
         },
     )
-    selected = [rows[i].domain for i in event.selection.rows if i < len(rows)]
-    st.button(
-        f"Research selected ({len(selected)})", type="primary", disabled=busy() or not selected,
-        on_click=start_research, args=(path, selected),
-        help="Tick rows in the table first. Two Gemini calls per company (research and contacts).",
-    )
-    st.caption(LEGAL_NOTE)
-    st.download_button("Download candidates CSV", pipeline.candidates_csv(s.discovery.candidates, s.brief),
-                       "candidates.csv", "text/csv")
+    return [rows[i].domain for i in event.selection.rows if i < len(rows)]
+
+
+def verdict_details(s: sessions.Session) -> None:
+    """The quotes behind each verdict."""
+    checked = [c for c in s.discovery.candidates if c.confirmation]
+    if not checked:
+        return
+    with st.expander(f"Why these verdicts ({len(checked)})"):
+        for c in checked:
+            st.markdown(f"**{c.name}** — {confirmation_text(c)}: {c.confirmation.reason}")
+            confirmation_quotes(c.confirmation)
+
+
+def confirmation_quotes(conf: Confirmation) -> None:
+    found = [(CATEGORIES[ch.category].label if ch.category in CATEGORIES else ch.category, ev)
+             for ch in conf.checks for ev in ch.evidence]
+    found += [(f"Licence: {conf.licence}", ev) for ev in conf.licence_evidence]
+    found += [(f"Sign it would sell: {sig.summary}", ev) for sig in conf.signals for ev in sig.evidence]
+    found += [(f"Blocker: {b.summary}", ev) for b in conf.blockers for ev in b.evidence]
+    for what, ev in found:
+        st.markdown(f"- *{what}:* {ev.quote} ([source]({ev.url}))")
 
 
 def kill_text(c: Candidate) -> str:
@@ -654,17 +754,26 @@ def pick_label(c: Candidate) -> str:
 
 
 def picker(p: compare.Preview, path: str) -> list[str]:
-    """Search the researched companies and pick up to MAX_COMPARED. Values are domains, so a
-    pick survives re-scoring."""
+    """Search the researched companies of one type and pick up to MAX_COMPARED: ready sources and
+    untapped holders are judged differently, so they are never compared with each other. Values
+    are domains, so a pick survives re-scoring."""
     alive = {c.domain: c for c in p.candidates if not c.killed}
+    kinds = list(dict.fromkeys(c.holder_type for c in alive.values()))
+    if len(kinds) > 1:
+        kind = st.radio("Compare", kinds, horizontal=True, key=_cmp(path, "type"), format_func=LIST_TITLES.get,
+                        help="Ready sources and untapped holders are compared separately")
+        alive = {d: c for d, c in alive.items() if c.holder_type == kind}
     key = _cmp(path, "pick")
-    chosen = [d for d in st.session_state.get(key, list(alive)[:MAX_COMPARED]) if d in alive]
+    saved = st.session_state.get(key)
+    chosen = [d for d in saved if d in alive] if saved is not None else list(alive)[:MAX_COMPARED]
+    if saved and not chosen:  # the picks were of the other type: start this one from its best
+        chosen = list(alive)[:MAX_COMPARED]
     st.session_state[key] = chosen
     search, top = st.columns([4, 1], vertical_alignment="bottom")
     query = search.text_input("Search researched companies", key=_cmp(path, "query"),
                               placeholder="Name, type, region, language or what data they hold")
     top.button(f"Top {MAX_COMPARED}", on_click=_pick, args=(path, list(alive)[:MAX_COMPARED]), width="stretch",
-               help="The best fits under the working brief")
+               help="The best fits of this type under the working brief")
     found = [d for d, c in alive.items() if d not in chosen and compare.matches(c, query)]
     picked = st.multiselect(f"Compare (up to {MAX_COMPARED})", chosen + found, key=key, max_selections=MAX_COMPARED,
                             format_func=lambda d: pick_label(alive[d]), placeholder="Pick companies to compare")
@@ -898,6 +1007,13 @@ def saleability_section(c: Candidate, brief: Brief) -> None:
         st.markdown(f"- **{label}** {score if score is not None else '?'}/5 ({state}){reason}")
         for ev in a.evidence if a else []:
             st.markdown(f"  > {ev.quote}\n\n  [{ev.url}]({ev.url})")
+    for t in c.triggers:
+        st.markdown(f"**{TRIGGER_LABELS[t.kind]} ({t.date}):** {t.summary}")
+        for ev in t.evidence:
+            st.markdown(f"  > {ev.quote}\n\n  [{ev.url}]({ev.url})")
+    if c.needs_trigger and not c.triggers:
+        st.caption("A big brand or regulated institution with no verified trigger (distress, a past data deal or a "
+                   "law allowing reuse): its fit stays capped.")
     if s and s.obstacle:
         st.markdown(f"**Main obstacle:** {s.obstacle}")
     if s and s.path:

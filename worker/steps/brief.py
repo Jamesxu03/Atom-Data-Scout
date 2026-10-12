@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 
 from worker import llm
 from worker.brief_template import FILL_PARTS, BriefDraft, category_guide, from_fill
-from worker.config import MODEL
 
 PROMPT = """You are helping a data broker pin down what a buyer wants to acquire. Fill in the
 brief template from the buyer's text below. A person will review every field in a form.
@@ -48,5 +47,5 @@ Buyer text:
 def draft_brief(text: str) -> BriefDraft:
     prompt = PROMPT.format(guide=category_guide(), text=text)
     with ThreadPoolExecutor(len(FILL_PARTS)) as pool:
-        parts = list(pool.map(lambda schema: llm.ask(prompt, schema, model=MODEL), FILL_PARTS))
+        parts = list(pool.map(lambda schema: llm.ask(prompt, schema, **llm.step("brief")), FILL_PARTS))
     return from_fill(parts)

@@ -105,3 +105,21 @@ def test_request_body(monkeypatch):
     assert body["tools"] == [{"type": "google_search"}]
     assert body["generation_config"] == {"thinking_level": "low"}
     assert body["response_format"]["schema"] == Answer.model_json_schema()
+
+
+def test_a_hung_call_times_out_and_is_retried(monkeypatch):
+    import httpx
+
+    calls = _use(monkeypatch, httpx.ReadTimeout("no answer"), '{"value": "ok"}')
+    assert llm.ask("q", Answer).value == "ok" and len(calls) == 2
+
+
+def test_the_client_gives_up_on_a_call_after_the_timeout(monkeypatch):
+    from worker.config import LLM_TIMEOUT_SECONDS
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    llm._client.cache_clear()
+    try:
+        assert llm._client()._api_client._http_options.timeout == LLM_TIMEOUT_SECONDS * 1000
+    finally:
+        llm._client.cache_clear()

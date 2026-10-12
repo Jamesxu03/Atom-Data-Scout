@@ -218,6 +218,18 @@ def fetch_html(url: str, browser: Browser | None = None) -> str:
     return html
 
 
+def fetch_rendered(url: str, browser: Browser) -> str:
+    """Browser-rendered HTML for url, cached with the deep crawl's renders. Raises on failure."""
+    if not url.startswith("http"):
+        url = "https://" + url
+    path = _cache_path(url, rendered=True)
+    if (html := _read_cache(path)) is not None:
+        return html
+    html = browser.render(url)
+    _write_cache(path, html)
+    return html
+
+
 def fetch_homepage_text(website: str) -> str:
     """Cheap homepage fetch for screening: httpx only (no browser), cached. Raises on failure.
 

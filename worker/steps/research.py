@@ -5,7 +5,8 @@ data can be processed, ...), and then by holder type:
 - ready source: the licence, in the same labels as D1 "Acceptable licence"
 - untapped holder: the three saleability questions (does the data still exist, is selling it
   allowed, are they willing), answered from the news and public records as well as the
-  company's own policies, with the main obstacle and how it could still be bought
+  company's own policies, with the main obstacle and how it could still be bought, and dated
+  triggers that make a sale likely (distress, a past data deal, a law allowing reuse; WS6)
 
 One Gemini call with Google Search per company, given its crawled homepage, privacy policy and
 terms. Every quote the model returns must appear on the page it cites: crawled pages are matched
@@ -18,6 +19,7 @@ screening flag from public pages, not legal advice.
 
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 
 from worker import llm
 from worker.brief_template import (
@@ -32,7 +34,7 @@ from worker.brief_template import (
     Brief,
     transfer_flags,
 )
-from worker.config import MODEL, PARALLEL_FETCHES, RESEARCH_TEXT_CHARS
+from worker.config import PARALLEL_FETCHES, RESEARCH_TEXT_CHARS, TRIGGER_YEARS
 from worker.crawl import Browser, CrawlResult, fetch_html, fetch_html_quick
 from worker.discovery.channels import resolve_source
 from worker.schemas import (
@@ -43,6 +45,7 @@ from worker.schemas import (
     CheckedCategory,
     Evidence,
     Research,
+    Trigger,
 )
 from worker.verify import (
     MIN_FACT_QUOTE_WORDS,
@@ -116,7 +119,7 @@ def _checks(brief: Brief) -> str:
     return "\n".join(lines) or "   (none)"
 
 
-def _pages(crawl: CrawlResult) -> str:
+def page_excerpts(crawl: CrawlResult) -> str:
     parts = [
         f"### {kind} ({page.url})\n{page.text[:RESEARCH_TEXT_CHARS]}"
         for kind in ("homepage", "privacy", "terms")
@@ -139,17 +142,29 @@ UNTAPPED_QUESTION = """saleability: the company holds the data without selling i
      days, or it doesn't record at all. Not how much: that is volume.
    - allowed: may it be sold? 5: the company recorded it itself and its terms allow other
      uses; 1: copyright belongs to someone else, terms say recordings are only for quality
-     monitoring and never shared, or it is health data or recordings kept for financial
-     regulation. Data its customers own needs their consent.
+     monitoring and never shared, or it is health data. Data its customers own needs their
+     consent; recordings kept for a regulator need a clause allowing other uses.
    - willing: would they sell? 5: insolvent, shutting down, selling assets, or has done data
-     deals with AI companies; 1: a big brand, or a strictly regulated institution.
+     deals with AI companies; 1: says it never shares or sells this data. Being a big brand or
+     regulated institution is not a 1 on its own: what matters is whether a trigger below exists.
    Then obstacle (the main thing in the way, one line) and path (how it could still be bought,
    e.g. "needs its customers' consent", "contact the administrators"; null if there is no way).
+
+   triggers: dated events from the last {years} years (or still going on) that make a sale
+   likely, each with its year and quotes that state it, ideally including the year:
+   - distress: insolvency, administration, liquidation, run-off, a unit, brand or call centre
+     closed or put up for sale
+   - precedent: it licensed, sold or shared this kind of data before, released a dataset, or
+     announced an AI data partnership
+   - law: a new law, regulation or regulator decision in its market that allows or requires
+     sharing or reusing this data and covers its sector
+   Empty if there are none.
 
    Search beyond its own site, in the news and public records. Run searches such as:
    "{name} lawsuit", "{name} fined", "{name} administration OR insolvency OR liquidation",
    "{name} shuts down", "{name} acquired", "{name} layoffs", "{name} data licensing",
-   "{name} AI training data partnership", "{name} privacy". Look for:
+   "{name} AI training data partnership", "{name} privacy", "{name} closes call centre",
+   "{name} sells unit", and the data-sharing or AI laws of its country. Look for:
    - insolvency, administration or liquidation notices, shutdowns, layoffs, asset sales, and
      acquisitions after which the product was retired (willing)
    - announced data partnerships or licensing deals with AI companies, or statements about
@@ -165,11 +180,11 @@ UNTAPPED_QUESTION = """saleability: the company holds the data without selling i
 
 def _type_question(c: Candidate) -> str:
     if c.holder_type == "untapped":
-        return UNTAPPED_QUESTION.format(unclear=UNCLEAR, name=c.name)
+        return UNTAPPED_QUESTION.format(unclear=UNCLEAR, name=c.name, years=TRIGGER_YEARS)
     return READY_QUESTION.format(licences="\n".join(f'   - "{k}": {v}' for k, v in LICENCE_MEANINGS.items()))
 
 
-def _holder(c: Candidate) -> str:
+def holder_text(c: Candidate) -> str:
     if c.holder_type == "untapped":
         if c.vendor:
             return "tool vendor: makes the tool its customers record with, so its customers hold the data"
@@ -182,8 +197,8 @@ def _holder(c: Candidate) -> str:
 def build_prompt(brief: Brief, c: Candidate, crawl: CrawlResult) -> str:
     return PROMPT.format(
         brief=brief.summary("FRV"), volume=brief.volume_wanted(), name=c.name, website=c.website,
-        reason=c.reason or "nothing", holder=_holder(c), type_question=_type_question(c),
-        checks=_checks(brief), unclear=UNCLEAR, pages=_pages(crawl),
+        reason=c.reason or "nothing", holder=holder_text(c), type_question=_type_question(c),
+        checks=_checks(brief), unclear=UNCLEAR, pages=page_excerpts(crawl),
     )
 
 
@@ -210,10 +225,35 @@ def verify_evidence(
     min_words: int = MIN_QUOTE_WORDS,
 ) -> list[Evidence]:
     """Only quotes found on the page they cite, with search redirect links resolved."""
-    return _verify_all([(evidence, fetch, min_words)], crawl)[0]
+    return verify_all([(evidence, fetch, min_words)], crawl)[0]
 
 
-def _verify_all(
+def recent(t: Trigger, today: date | None = None) -> bool:
+    """Happened in the last TRIGGER_YEARS years, or is still going on."""
+    year = t.year
+    return year is not None and (t.ongoing or year >= (today or date.today()).year - TRIGGER_YEARS)
+
+
+def dated(t: Trigger, ev: Evidence) -> bool:
+    """The trigger's year is in the quote, or in the page's address (news URLs often carry it),
+    so the quote backs when it happened, not only that it did."""
+    return t.year is not None and (str(t.year) in ev.quote or f"/{t.year}" in ev.url)
+
+
+def verify_triggers(
+    triggers: list[Trigger], crawl: CrawlResult, fetch: Callable[[str], str] = fetch_html_quick,
+) -> list[Trigger]:
+    """Recent triggers kept with their verified, dated quotes; any left with none are dropped."""
+    recent_ones = [t for t in triggers if recent(t)]
+    checked = verify_all([(t.evidence, fetch, MIN_QUOTE_WORDS) for t in recent_ones], crawl)
+    out = []
+    for t, evidence in zip(recent_ones, checked, strict=True):
+        if kept := [ev for ev in evidence if dated(t, ev)]:
+            out.append(t.model_copy(update={"evidence": kept}))
+    return out
+
+
+def verify_all(
     groups: list[tuple[list[Evidence], Callable[[str], str], int]], crawl: CrawlResult,
 ) -> list[list[Evidence]]:
     """verify_evidence for several lists at once: every quote is checked in parallel, since
@@ -245,7 +285,7 @@ def verify_research(
         *(([f], fetch, MIN_FACT_QUOTE_WORDS) for f in facts.values()),
         *((getattr(s, q).evidence, news_fetch or fetch, MIN_QUOTE_WORDS) for q in SALEABILITY_QUESTIONS if s),
     ]
-    verified = iter(_verify_all(groups, crawl))
+    verified = iter(verify_all(groups, crawl))
 
     licence_evidence, volume_evidence = next(verified), next(verified)
     update = {"licence_evidence": licence_evidence, "volume_evidence": volume_evidence}
@@ -270,6 +310,7 @@ def verify_research(
             answers[q] = a.model_copy(update={"evidence": evidence, "verified": bool(evidence),
                                               "score": a.score if evidence else None})
         update["saleability"] = s.model_copy(update=answers)
+    update["triggers"] = verify_triggers(r.triggers, crawl, news_fetch or fetch) if r.triggers else []
     return r.model_copy(update=update)
 
 
@@ -277,9 +318,9 @@ def research(brief: Brief, c: Candidate, crawl: CrawlResult, fetch: Callable[[st
              news_fetch: Callable[[str], str] | None = None) -> Research:
     """news_fetch defaults to fetch_html with one browser for all the news pages, launched only
     if one needs rendering."""
-    found = llm.ask(build_prompt(brief, c, crawl), Research, model=MODEL, use_search=True)
+    found = llm.ask(build_prompt(brief, c, crawl), Research, use_search=True, **llm.step("research"))
     if c.holder_type != "untapped":
-        found = found.model_copy(update={"saleability": None})
+        found = found.model_copy(update={"saleability": None, "triggers": []})
     if news_fetch:
         return verify_research(found, crawl, fetch, news_fetch)
     with Browser() as browser:

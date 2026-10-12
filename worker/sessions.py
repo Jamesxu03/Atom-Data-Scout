@@ -4,8 +4,9 @@ rerunning:
   data/sessions/20260930-1215-middle-east-meeting-audio/
     session.json     name, created, brief text, stage, timings, selected domains
     brief.json       the final Brief: every category's choices, importance, stated or inferred
-    hypotheses.json
-    discovery.json   hits + candidates (scores, research, contacts and email on each)
+    hypotheses.json  the main ones, and any added for archetypes nothing was found for
+    markets.json     local markets searched natively: their search hooks and law signals
+    discovery.json   hits + candidates (scores, research, contacts and email on each), rounds
 
 The timestamp prefix keeps folder names in creation order. Rerunning or re-comparing
 (worker/compare.py) with an edited brief always creates a new session, so old results are
@@ -23,14 +24,15 @@ from pydantic import BaseModel
 
 from worker.brief_template import Brief, from_legacy
 from worker.discovery import Discovery
-from worker.schemas import HolderHypothesis
+from worker.schemas import HolderHypothesis, MarketPlan
 from worker.scoring import is_relevant, rank, rescore
-from worker.steps.hypotheses import HypothesisList
+from worker.steps.confirm import redecide
 
 SESSIONS_DIR = Path(__file__).resolve().parent.parent / "data" / "sessions"
 
-# searching: started (or the app stopped mid-search); partial: the Gemini quota ran out
-Stage = Literal["searching", "done", "partial", "failed"]
+# searching: started (or the app stopped mid-search); confirming: the list is ready and the best
+# candidates are being confirmed; partial: the Gemini quota ran out
+Stage = Literal["searching", "confirming", "done", "partial", "failed"]
 
 
 class BriefChange(BaseModel):
@@ -68,6 +70,17 @@ class Session:
     brief: Brief
     hypotheses: list[HolderHypothesis] = field(default_factory=list)
     discovery: Discovery = field(default_factory=lambda: Discovery(hits=[], candidates=[]))
+    markets: list[MarketPlan] = field(default_factory=list)
+
+
+class MarketPlans(BaseModel):
+    markets: list[MarketPlan]
+
+
+class AnyHypotheses(BaseModel):
+    """hypotheses.json: the main 5 to 10, plus any a later round added for archetypes."""
+
+    hypotheses: list[HolderHypothesis]
 
 
 def _slug(name: str) -> str:
@@ -98,7 +111,9 @@ def save(session: Session) -> None:
     _write(session.path / "session.json", session.meta)
     _write(session.path / "brief.json", session.brief)
     if session.hypotheses:
-        _write(session.path / "hypotheses.json", HypothesisList(hypotheses=session.hypotheses))
+        _write(session.path / "hypotheses.json", AnyHypotheses(hypotheses=session.hypotheses))
+    if session.markets:
+        _write(session.path / "markets.json", MarketPlans(markets=session.markets))
     if session.discovery.hits or session.discovery.candidates:
         _write(session.path / "discovery.json", session.discovery)
 
@@ -114,11 +129,13 @@ def _read_brief(path: Path) -> Brief:
 
 def load(path: Path | str) -> Session:
     path = Path(path)
-    hyps = _read(path / "hypotheses.json", HypothesisList)
+    hyps = _read(path / "hypotheses.json", AnyHypotheses)
+    plans = _read(path / "markets.json", MarketPlans)
     brief = _read_brief(path / "brief.json")
     discovery = _read(path / "discovery.json", Discovery) or Discovery(hits=[], candidates=[])
-    for c in discovery.candidates:  # today's scoring rules, from the stored screen and research results
+    for c in discovery.candidates:  # today's rules, from the stored screen, research and confirmation results
         rescore(c, brief)
+        redecide(brief, c)
     discovery.candidates = rank(discovery.candidates)
     return Session(
         path=path,
@@ -126,7 +143,13 @@ def load(path: Path | str) -> Session:
         brief=brief,
         hypotheses=hyps.hypotheses if hyps else [],
         discovery=discovery,
+        markets=plans.markets if plans else [],
     )
+
+
+def load_meta(path: Path | str) -> SessionMeta | None:
+    """Only session.json: cheap enough to poll while a job runs."""
+    return _read(Path(path) / "session.json", SessionMeta)
 
 
 def list_all() -> list[tuple[Path, SessionMeta]]:

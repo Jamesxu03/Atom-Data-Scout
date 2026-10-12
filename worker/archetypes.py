@@ -1,9 +1,12 @@
 """Why an untapped holder has data it doesn't sell: ten archetypes, defined once as data.
 
-Internal only: the hypotheses step and the "signals" discovery channel use them as a checklist,
-so searches think of banks, subtitling firms and device makers, not just the obvious service
-by-product. They are never shown or stored per company. SUPPLIER_TOOLS feeds the discovery
-channel that finds holders through the customer lists of the tools they run on.
+The hypotheses step, the "signals" discovery channel and the screen use them as a checklist, so
+searches think of banks, subtitling firms and device makers, not just the obvious service
+by-product. The screen also names the archetype of each untapped holder: dormant archives and
+leftovers start with a better licence prior (scoring.py), and later discovery rounds look for
+archetypes nothing was found for yet. Examples lead with the organisations that hold the data,
+not the tools that record it. SUPPLIER_TOOLS names the tools whose customer stories lead to
+holders.
 """
 
 from dataclasses import dataclass
@@ -26,13 +29,17 @@ GROUP = {AUDIO: "audio", VIDEO: "visual", IMAGE: "visual", TEXT: "text", TABULAR
 ARCHETYPES: tuple[Archetype, ...] = (
     Archetype(
         "service", "Service by-product", "its product or service records the data as it runs",
-        {"audio": ("meeting and call-recording tools", "contact centres and outsourcers", "telehealth platforms",
-                   "ride-hailing safety audio", "drive-thru voice ordering"),
+        {"audio": ("enterprises and professional firms that record client and internal meetings",
+                   "contact-centre outsourcers serving banks and insurers",
+                   "training providers with recorded workshops", "telehealth platforms",
+                   "ride-hailing safety audio", "drive-thru voice ordering", "meeting and call-recording tools"),
          "visual": ("video-call platforms", "telehealth video", "retail analytics cameras"),
          "text": ("customer-support chat platforms", "helpdesk software", "community forums"),
          "records": ("booking and dispatch systems", "loyalty programmes", "payment terminals")}),
     Archetype(
-        "kept_by_law", "Kept by law", "regulation makes it record and keep the data for years",
+        "kept_by_law", "Kept by law",
+        "regulation makes it record and keep the data for years; usually a big or regulated institution, "
+        "in scope only when it is distressed, has shared data before, or a law now allows reuse",
         {"audio": ("bank and broker trader calls (MiFID II)", "insurance claims lines", "debt collectors",
                    "emergency dispatch", "alarm-monitoring centres"),
          "visual": ("CCTV kept by casinos, banks and transport operators", "body-worn camera footage"),
@@ -87,8 +94,17 @@ ARCHETYPES: tuple[Archetype, ...] = (
 
 BY_KEY = {a.key: a for a in ARCHETYPES}
 
-# Tools untapped holders run on: their case studies and logo walls name the holders
+# Tools untapped holders run on, by name: each one's customer stories, case studies and logo
+# walls name organisations that record this data with it (one discovery call per tool)
 SUPPLIER_TOOLS = {
+    "audio": ("Gong", "NICE", "Verint", "Genesys", "Five9", "Calabrio", "Otter", "Fireflies", "Zoom", "Panopto",
+              "Kaltura"),
+    "visual": ("Samsara", "Lytx", "Motive", "Milestone", "Genetec", "Verkada", "DroneDeploy", "Matterport"),
+    "text": ("Zendesk", "Intercom", "Freshdesk", "LivePerson", "Smartling", "Phrase"),
+    "records": ("Samsara", "Geotab", "AMCS", "Itron", "Siemens MindSphere"),
+}
+# The same tools as families, for prompts that search an industry rather than one tool
+SUPPLIER_FAMILIES = {
     "audio": ("speech-to-text APIs", "call-recording and contact-centre platforms", "conversation intelligence",
               "lecture-capture systems", "dubbing and localisation software"),
     "visual": ("dashcam and telematics providers", "video management and CCTV software", "drone software",
@@ -114,4 +130,19 @@ def guide(modalities: list[str]) -> str:
 
 
 def supplier_tools(modalities: list[str]) -> list[str]:
-    return [t for g in groups(modalities) for t in SUPPLIER_TOOLS[g]]
+    """Named tools for these modalities, without repeats."""
+    return list(dict.fromkeys(t for g in groups(modalities) for t in SUPPLIER_TOOLS[g]))
+
+
+def supplier_families(modalities: list[str]) -> list[str]:
+    return [t for g in groups(modalities) for t in SUPPLIER_FAMILIES[g]]
+
+
+def keys_text() -> str:
+    """One line per archetype for the screen: key and label."""
+    return "\n".join(f"- {a.key}: {a.label}, {a.why}" for a in ARCHETYPES)
+
+
+def with_examples(modalities: list[str]) -> list[Archetype]:
+    """Archetypes that have examples for these modalities: the ones worth searching for."""
+    return [a for a in ARCHETYPES if any(a.examples.get(g) for g in ["any", *groups(modalities)])]

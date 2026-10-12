@@ -69,8 +69,8 @@ def test_merge_skips_excluded_domains():
 
 def _router(prompt: str) -> FoundList:
     """Fake search results keyed off which channel prompt this is."""
-    if "compete with" in prompt:
-        seed = prompt.split("compete with ")[1].split(" (")[0]
+    if "organisations similar to" in prompt:
+        seed = prompt.split("similar to ")[1].split(" (")[0]
         return FoundList(companies=[Found(name=f"Rival of {seed}", website=f"https://rival-{seed.lower()}.com", source_url=f"https://blog.com/{seed}-alternatives")])
     if "directory category pages" in prompt:
         return FoundList(companies=[
@@ -82,6 +82,11 @@ def _router(prompt: str) -> FoundList:
     if "insolvency notices" in prompt:
         return FoundList(companies=[Found(name="Bust Co", website="https://bust.example",
                                           source_url="https://gazette.example/notice")])
+    for phrase, name in (("licensed, sold or shared data", "Precedent Co"), ("regulated institutions", "Big Bank")):
+        if phrase in prompt:
+            slug = name.lower().replace(" ", "")
+            return FoundList(companies=[Found(name=name, website=f"https://{slug}.example",
+                                              source_url=f"https://news.example/{slug}")])
     if "not only companies" in prompt:
         return FoundList(companies=[Found(name="Parliament", website="https://parliament.example",
                                           source_url="https://parliament.example/sessions")])
@@ -108,7 +113,7 @@ def test_discover_runs_phase_one_channels_within_budget(fake_ask):
                 + DISCOVERY["distressed_calls"] + untapped)
     assert len(fake_ask.calls) == expected
     assert all(c.use_search for c in fake_ask.calls)
-    assert not any("compete with" in c.prompt for c in fake_ask.calls)  # no snowball yet
+    assert not any("organisations similar to" in c.prompt for c in fake_ask.calls)  # no snowball yet
     vendor_prompts = [c.prompt for c in fake_ask.calls if "already produce or sell data" in c.prompt]
     assert len(set(vendor_prompts)) == angles  # each call searches from a different angle
     public_prompts = [c.prompt for c in fake_ask.calls if "not only companies" in c.prompt]
@@ -122,6 +127,7 @@ def test_discover_runs_phase_one_channels_within_budget(fake_ask):
     assert by_domain["dataco.io"].channels == ["marketplace"]
     assert by_domain["parliament.example"].channels == ["public_source"]
     assert by_domain["bust.example"].channels == ["distressed"]
+    assert by_domain["precedentco.example"].channels == by_domain["bigbank.example"].channels == ["distressed"]
     assert [by_domain[f"{n}.example"].channels for n in ("callcentre", "toolcustomer", "tenderwinner")] == [
         ["signals"], ["suppliers"], ["records"]]
     assert len(d.hits) > len(d.candidates)
@@ -138,8 +144,11 @@ def test_discover_only_runs_channels_for_the_source_types_picked(fake_ask):
                                    + untapped_calls)
     (signals,) = [c.prompt for c in fake_ask.calls if "signs on their own pages" in c.prompt]
     assert "Kept by law" in signals and "we retain recordings for" in signals  # the archetype checklist
-    (suppliers,) = [c.prompt for c in fake_ask.calls if "logo walls" in c.prompt]
-    assert "call-recording and contact-centre platforms" in suppliers  # tools for the audio modality
+    suppliers = [c.prompt for c in fake_ask.calls if "logo walls" in c.prompt]
+    # one call per named tool for the audio modality, each searching that tool's customer stories
+    assert len(suppliers) == DISCOVERY["suppliers_calls"]
+    assert {t for t in ["Gong", "NICE", "Verint", "Genesys"] for p in suppliers if f'"{t} customer story"' in p} == {
+        "Gong", "NICE", "Verint", "Genesys"}
 
     fake_ask.calls.clear()
     d = discover(brief_with(sources=Pick(values=[READY]), exclusions=Pick(values=["dataco.io"])), HYPS, **QUIET)
@@ -184,6 +193,7 @@ def test_snowball_adds_competitors_and_keeps_scores(fake_ask):
     otter.reason, otter.fit = "notetaker", 4.0
 
     d2 = snowball(d, [("Otter", "https://otter.ai")], **QUIET)
+    assert all(h.round == 2 for h in d2.hits if h.channel == "snowball")  # a round of its own
     by_domain = {c.domain: c for c in d2.candidates}
     assert by_domain["rival-otter.com"].channels == ["snowball"]
     assert not by_domain["rival-otter.com"].screened  # new: needs screening

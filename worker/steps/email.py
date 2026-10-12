@@ -3,7 +3,6 @@ no search. The draft is only shown and saved for the user to edit; nothing is se
 
 from worker import llm
 from worker.brief_template import CATEGORIES, OPEN, OPEN_CONDITIONS, RESTRICTED, Brief
-from worker.config import MODEL
 from worker.schemas import Candidate, Contact, EmailDraft
 
 # What to ask for depends on the holder type and, for a ready source, the licence research found
@@ -53,6 +52,7 @@ def _facts(c: Candidate) -> str:
         lines += [f"- {CATEGORIES[ch.category].label}: {ch.finding}" for ch in r.checks if ch.verdict != "unclear"]
     if s := c.current_saleability():
         lines += [f"- {a.reason}" for q in ("exists", "allowed", "willing") if (a := getattr(s, q)).verified and a.reason]
+    lines += [f"- {t.summary} ({t.date})" for t in c.triggers]
     return "\n".join(lines) or "- Nothing beyond its name and website."
 
 
@@ -97,5 +97,5 @@ def build_prompt(brief: Brief, c: Candidate, contact: Contact | None) -> str:
 
 
 def draft_email(brief: Brief, c: Candidate, contact: Contact | None) -> EmailDraft:
-    draft = llm.ask(build_prompt(brief, c, contact), EmailDraft, model=MODEL)
+    draft = llm.ask(build_prompt(brief, c, contact), EmailDraft, **llm.step("email"))
     return draft.model_copy(update={"to": contact.email if contact else None})

@@ -132,10 +132,15 @@ def _set_aside(c: Candidate, old: Brief, new: Brief) -> list[str]:
     return reasons
 
 
-def _ranks(fits: dict[str, float | None]) -> dict[str, int]:
-    """1 for the best fit; unknown fit last."""
-    order = sorted(fits, key=lambda d: (fits[d] is None, -(fits[d] or 0)))
-    return {d: i + 1 for i, d in enumerate(order)}
+def _ranks(fits: dict[str, float | None], types: dict[str, str | None]) -> dict[str, int]:
+    """1 for the best fit among companies of the same type: ready sources and untapped holders
+    are never ranked against each other. Unknown fit last."""
+    out = {}
+    for kind in dict.fromkeys(types.values()):
+        group = [d for d in fits if types.get(d) == kind]
+        order = sorted(group, key=lambda d: (fits[d] is None, -(fits[d] or 0)))
+        out |= {d: i + 1 for i, d in enumerate(order)}
+    return out
 
 
 @dataclass
@@ -147,8 +152,8 @@ class Preview:
     candidates: list[Candidate]  # copies, re-scored and ranked; killed ones last
     provisional: dict[str, list[str]]  # domain -> why its fit rests on judgements of an older brief
     fit_before: dict[str, float | None]  # domain -> fit in the original search
-    rank_before: dict[str, int]  # among the companies not killed then
-    rank_now: dict[str, int]  # among the companies not killed now
+    rank_before: dict[str, int]  # among the companies of its type not killed then
+    rank_now: dict[str, int]  # among the companies of its type not killed now
     changes: list[BriefChange]  # from the original search's brief
     unsaved: bool  # brief or kills differ from the session's
 
@@ -181,10 +186,11 @@ def preview(session: Session, brief: Brief, kills: Kills | None = None) -> Previ
             provisional[c.domain] = list(dict.fromkeys(reasons))
     compared = session.meta.parent is not None
     fit_before = dict(session.meta.parent_fit) if compared else {c.domain: c.fit for c in researched}
+    types = {c.domain: c.holder_type for c in out}
     return Preview(
         brief=brief, kills=kills, candidates=rank(out), provisional=provisional, fit_before=fit_before,
-        rank_before=_ranks({c.domain: fit_before.get(c.domain) for c in researched if not c.killed}),
-        rank_now=_ranks({c.domain: c.fit for c in out if not c.killed}),
+        rank_before=_ranks({c.domain: fit_before.get(c.domain) for c in researched if not c.killed}, types),
+        rank_now=_ranks({c.domain: c.fit for c in out if not c.killed}, types),
         changes=_chain(session.meta.changes, changes(session.brief, brief)),
         unsaved=brief != session.brief or kills != saved_kills(session),
     )

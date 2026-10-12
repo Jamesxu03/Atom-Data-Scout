@@ -14,7 +14,17 @@ from a homepage, so they only weigh in through the licence score: capping on the
 holders of their customers' data (consent puts "allowed" at 2) whatever research might find.
 
 Tool vendors (untapped companies whose customers record and own the data) are capped below
-RELEVANT_FIT: they lead to holders but aren't one.
+RELEVANT_FIT: they lead to holders but aren't one. So are big brands and regulated institutions
+(needs_trigger) until a dated trigger is verified: insolvency or a unit for sale (willing 5), a
+past data deal (4), or a law that allows reuse (3). The trigger then sets "willing".
+
+An untapped holder with no answers yet starts at 3 (medium), or at 4 for archetypes that are
+more likely for sale (a dormant archive, production or research leftovers, assessment data)
+when it owns the data.
+
+Ready sources and untapped holders are two lists (split), never ranked against each other.
+Within a list, rank() puts confirmed companies first (see steps/confirm.py), then possible
+ones, then the rest by fit, and rejected ones last.
 
 How the brief counts (see worker/brief_template.py):
 - a category that is filled in counts in the score
@@ -34,12 +44,15 @@ from worker.brief_template import (
     Brief,
 )
 from worker.config import (
+    ARCHETYPE_PRIOR,
     FIT_WEIGHTS,
     INTERNAL_ONLY_CAP,
     LOW_SALEABILITY_CAP,
     MUST_HAVE_CAP,
     NOT_SELLABLE_CAP,
     RELEVANT_FIT,
+    TRIGGER_CAP,
+    TRIGGER_WILLING,
     VENDOR_CAP,
 )
 from worker.schemas import SALEABILITY_QUESTIONS, Candidate
@@ -72,6 +85,8 @@ def answers(c: Candidate, brief: Brief) -> dict[str, int | None]:
     D3 "accept, check later" leaves the answer as it is."""
     s = c.current_saleability()
     scores = {q: clamp(getattr(s, q).score) if s else None for q in SALEABILITY_QUESTIONS}
+    if c.triggers:  # a verified trigger says how willing, whatever the pages guessed
+        scores["willing"] = max(scores["willing"] or 0, *(TRIGGER_WILLING[t.kind] for t in c.triggers))
     if c.data_owner == "customers":
         d6 = brief.active("customer_data")
         if CUSTOMER_EXCLUDE in d6:
@@ -102,7 +117,7 @@ def capping_grade(c: Candidate, brief: Brief) -> int | None:
     found = []
     for q in SALEABILITY_QUESTIONS:
         a = getattr(s, q) if s else None
-        if a is None or a.score is None:
+        if a is None or a.score is None or (q == "willing" and c.triggers):
             continue
         if a.score == 1:
             found.append(1)
@@ -184,6 +199,8 @@ def fit(c: Candidate, brief: Brief) -> float | None:
         value = min(value, MUST_HAVE_CAP)
     if c.vendor:
         value = min(value, VENDOR_CAP)
+    if c.needs_trigger and not c.triggers:
+        value = min(value, TRIGGER_CAP)
     if c.holder_type == "untapped" and (g := capping_grade(c, brief)) is not None and g <= 2:
         value = min(value, NOT_SELLABLE_CAP if g == 1 else LOW_SALEABILITY_CAP)
     if c.holder_type == "ready" and c.research and c.research.licence == INTERNAL_ONLY:
@@ -197,7 +214,9 @@ def licence_score(c: Candidate, brief: Brief) -> int | None:
     internal use only)."""
     if c.holder_type == "untapped":
         g = grade(c, brief)
-        return UNTAPPED_PRIOR if g is None else g
+        if g is not None:
+            return g
+        return ARCHETYPE_PRIOR.get(c.archetype, UNTAPPED_PRIOR) if c.data_owner == "company" else UNTAPPED_PRIOR
     if c.holder_type != "ready":
         return None
     found = c.research.licence if c.research else None
@@ -228,10 +247,30 @@ def is_relevant(c: Candidate) -> bool:
     return not c.excluded and not c.killed and c.fit is not None and c.fit >= RELEVANT_FIT
 
 
+# Confirmed first, then possible, then unchecked and unconfirmed by fit, rejected last
+VERDICT_TIER = {"confirmed": 0, "possible": 1, None: 2, "unconfirmed": 2, "rejected": 3}
+
+
+def verdict(c: Candidate) -> str | None:
+    return c.confirmation.verdict if c.confirmation else None
+
+
 def rank(candidates: list[Candidate]) -> list[Candidate]:
-    """By fit; unknown fit (e.g. unreachable homepage), killed and excluded companies last.
-    Corroboration (more channels, hypotheses and sources) only breaks ties: it favours famous
-    companies, which are the least likely to sell their customers' data."""
+    """By verdict, then fit; unknown fit (e.g. unreachable homepage), killed and excluded
+    companies last. Verified selling signals break ties: corroboration (being found by many
+    channels) used to, and it favoured famous companies, the least likely to sell."""
     return sorted(candidates, key=lambda c: (
-        c.excluded, c.killed, c.fit is None, -(c.fit or 0), tuple(-int(x) for x in c.corroboration()),
+        c.excluded, c.killed, VERDICT_TIER[verdict(c)], c.fit is None, -(c.fit or 0), -c.selling_signals(),
     ))
+
+
+SIDES = ("untapped", "ready")
+
+
+def split(candidates: list[Candidate]) -> dict[str | None, list[Candidate]]:
+    """Ranked ready sources, untapped holders, and the rest (not screened or unrelated): the
+    two lists are never ranked against each other."""
+    out: dict[str | None, list[Candidate]] = {"untapped": [], "ready": [], None: []}
+    for c in rank(candidates):
+        out[c.holder_type if c.holder_type in SIDES else None].append(c)
+    return out

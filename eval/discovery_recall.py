@@ -49,8 +49,10 @@ def load_seeds(path: Path = SEEDS_CSV) -> list[Seed]:
 
 
 def _norm_name(name: str) -> str:
+    """Lowercased, without legal suffixes or punctuation; letters of any script are kept, so
+    two different Japanese or Arabic names never both become ""."""
     name = re.sub(r"\b(ltd|limited|inc|plc|llc|gmbh|corp|co)\b\.?", "", name.lower())
-    return re.sub(r"[^a-z0-9]", "", name)
+    return re.sub(r"[\W_]", "", name)
 
 
 def match(seeds: list[Seed], candidates: list[Candidate]) -> list[SeedMatch]:

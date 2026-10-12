@@ -7,6 +7,15 @@ exist, is selling it allowed, are they willing), the main obstacle and how to bu
 Scores and fit are then computed in Python (see scoring.py); research later checks the answers
 against news and the company's own policies.
 
+Big brands and regulated institutions (banks, insurers, airlines, telcos) are flagged
+needs_trigger rather than scored "not willing": they are in scope only once a dated trigger is
+verified (insolvency, a past data deal, a law change; see steps/triggers.py), and capped until
+then. The screen also names why an untapped holder has the data (its archetype).
+
+A homepage with almost no text (a JavaScript site, or a small local one) is rendered in a
+browser and sent with more room, so a company isn't ranked low just for a thin page. Pages may
+be in any language; quotes stay in the page's language so they can be found on it.
+
 Rules the model doesn't apply reliably are enforced afterwards (see _apply): only the
 buyer's languages and regions count, only must-have categories can be contradicted, a ready
 source whose data belongs to its customers is a service, so an untapped holder, and saleability
@@ -23,20 +32,31 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, Field
 
-from worker import llm
+from worker import archetypes, llm
 from worker.brief_template import CATEGORIES, CUSTOMER_EXCLUDE, Brief
 from worker.config import (
-    MODEL,
     PARALLEL_FETCHES,
     PARALLEL_LLM_CALLS,
     SCREEN_BATCH_SIZE,
     SCREEN_TEXT_CHARS,
+    THIN_PAGE_CHARS,
+    THIN_PAGE_RENDERS,
+    THIN_PAGE_TEXT_CHARS,
 )
-from worker.crawl import extract_text, fetch_homepage_text, fetch_html_quick, same_site
+from worker.crawl import (
+    Browser,
+    extract_text,
+    fetch_homepage_text,
+    fetch_html_quick,
+    fetch_rendered,
+    same_site,
+)
 from worker.discovery.channels import GROUNDING_REDIRECT, mention_at
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
 from worker.schemas import FACTS, Answer, Candidate, DataOwner, Fact, Saleability, Scores
+
+ArchetypeKey = Literal.__getitem__((*archetypes.BY_KEY, "none"))
 from worker.scoring import rescore
 from worker.verify import MIN_FACT_QUOTE_WORDS, quote_in_text, value_in_quote
 
@@ -52,6 +72,8 @@ class ScreenItem(BaseModel):
     data_owner: DataOwner = Field(description="Who controls the data this company holds")
     collector: bool = Field(default=False, description="Ready source that only records to order")
     vendor: bool = Field(default=False, description="Untapped only: makes the tool; its customers hold the data")
+    needs_trigger: bool = Field(default=False, description="Untapped only: a big brand or regulated institution")
+    archetype: ArchetypeKey = Field(default="none", description="Untapped only: why it holds the data")
     exists: int | None = Field(default=None, description="Untapped only: 1 to 5, null if the pages don't say")
     allowed: int | None = Field(default=None, description="Untapped only: 1 to 5, null if the pages don't say")
     willing: int | None = Field(default=None, description="Untapped only: 1 to 5, null if the pages don't say")
@@ -83,7 +105,8 @@ Must-have requirements, by key:
 {musts}
 
 Below are excerpts from several organisations' homepages and, when it's another page, from
-the page a web search found them on. Read both: the source page often shows the line of
+the page a web search found them on. Pages may be in any language: judge them in it, and copy
+quotes in the page's own language, never translated. Read both: the source page often shows the line of
 business that matters when the homepage leads with something else (e.g. a translation
 company's speech-data collection service). Claims on another site's page are weaker than
 the organisation's own pages.
@@ -128,12 +151,24 @@ to 5, or null when the pages don't say:
   or it doesn't record at all. How much there is goes in volume_signal, not here.
 - allowed: may it be sold? 5: the company recorded it itself and its terms allow other uses;
   1: copyright belongs to someone else, terms say recordings are only for quality monitoring
-  and never shared, or it is health data or recordings kept for financial regulation.
+  and never shared, or it is health data.
 - willing: would they sell? 5: insolvent, shutting down, selling assets, or has done data
-  deals with AI companies; 1: a big brand, or a strictly regulated institution.
+  deals with AI companies; 1: says it never shares or sells this data. Being a big brand or
+  regulated is not a reason for 1: set needs_trigger instead.
 obstacle: the main thing in the way, in one line (e.g. "terms say recordings are only used for
 quality monitoring"). path: how it could still be bought, if there is a way (e.g. "needs its
 customers' consent", "contact the administrators"); null if none.
+
+needs_trigger (untapped only): true for a big brand or a regulated institution (a bank,
+insurer, airline, telco, hospital group or utility, or a household-name company). These rarely
+sell data in normal times; they are checked later for insolvency, a past data deal or a law
+change. Don't lower willing or allowed for being one, unless the pages say so. False for public
+bodies (councils, parliaments, courts, public broadcasters): what they record is often public
+record already.
+
+archetype (untapped only): why it holds the data, one key from:
+{archetypes}
+"none" for ready sources and companies that fit none.
 
 data_match (1 to 5):
 - 5: its core business clearly involves this kind of data, with the buyer's must-have and
@@ -223,7 +258,7 @@ def source_excerpt(c: Candidate, fetch: Callable[[str], str] = fetch_html_quick)
 
 def _screen_batch(brief: Brief, batch: list[Fetched]) -> dict[str, ScreenItem]:
     companies = "\n\n".join(
-        f"### {c.domain} ({c.name})\nHomepage:\n{home[:SCREEN_TEXT_CHARS] or NO_HOMEPAGE}"
+        f"### {c.domain} ({c.name})\nHomepage:\n{home or NO_HOMEPAGE}"
         + (f"\n\n{src}" if src else "")
         for c, home, src in batch
     )
@@ -233,9 +268,10 @@ def _screen_batch(brief: Brief, batch: list[Fetched]) -> dict[str, ScreenItem]:
         regions=", ".join(brief.regions) or "any",
         volume=brief.volume_wanted(),
         musts=_musts(brief),
+        archetypes=archetypes.keys_text(),
         companies=companies,
     )
-    result = llm.ask(prompt, ScreenBatch, model=MODEL)
+    result = llm.ask(prompt, ScreenBatch, **llm.step("screen"))
     return {item.domain.lower(): item for item in result.results}
 
 
@@ -283,6 +319,9 @@ def _apply(brief: Brief, c: Candidate, item: ScreenItem, home: str = "", src: st
     elif item.holder_type == "ready" and c.data_owner == "customers" and not c.collector:
         c.holder_type = "untapped"  # works on its clients' data: a service, not a data seller
     c.vendor = item.vendor and c.holder_type == "untapped"
+    untapped = c.holder_type == "untapped"
+    c.needs_trigger = item.needs_trigger and untapped and not c.vendor
+    c.archetype = item.archetype if untapped and item.archetype != "none" else None
     if c.holder_type == "untapped":
         c.saleability = Saleability(**{q: Answer(score=getattr(item, q)) for q in ("exists", "allowed", "willing")},
                                     obstacle=item.obstacle, path=item.path)
@@ -314,11 +353,18 @@ def screen(
     fetch: Callable[[str], str] | None = None,
     progress: Callable[[str], None] = print,
     source: Callable[[Candidate], str | None] = source_excerpt,
+    render: Callable[[str], str] | None = None,
 ) -> list[Candidate]:
     """Screen and score every candidate not screened yet (in place) and return all of them.
+    render(url) gives a thin homepage's text from a browser; by default one is used only when
+    fetch is the default too.
 
     Raises QuotaExceeded after keeping the results it did get.
     """
+    if render is None and fetch is None:
+        with Browser() as browser:  # only launched if a page is thin
+            return screen(brief, candidates, fetch_homepage_text, progress, source,
+                          lambda url: extract_text(fetch_rendered(url, browser)))
     fetch = fetch or fetch_homepage_text
     todo = [c for c in candidates if not c.screened]
     if not todo:
@@ -342,12 +388,21 @@ def screen(
                 return c, "", src
             c.reason = f"not screened: {why}, and no other page about it was found"  # kept, fit unknown
             return None
-        return c, home, source(c)
+        return c, home[:SCREEN_TEXT_CHARS], source(c)
 
     progress(f"Fetching {len(todo)} homepages and source pages")
     fetched = dict(run_parallel(
         [(c.domain, lambda c=c: try_fetch(c)) for c in todo], PARALLEL_FETCHES, lambda _: None
     ).results)
+    thin = [f for c in todo if (f := fetched.get(c.domain)) and f[1] and len(f[1]) < THIN_PAGE_CHARS]
+    if render and thin:
+        progress(f"Rendering {min(len(thin), THIN_PAGE_RENDERS)} thin homepages in a browser")
+        rendered = dict(run_parallel(  # renders take turns in the browser; this only overlaps the waiting
+            [(c.domain, lambda c=c: render(c.website)) for c, _, _ in thin[:THIN_PAGE_RENDERS]],
+            PARALLEL_FETCHES, lambda _: None).results)
+        for c, home, src in thin:
+            if len(text := rendered.get(c.domain, "")) > len(home):
+                fetched[c.domain] = (c, text[:THIN_PAGE_TEXT_CHARS], src)
     reachable = [f for c in todo if (f := fetched.get(c.domain)) and (f[1] or f[2])]
 
     batches = [reachable[i : i + SCREEN_BATCH_SIZE] for i in range(0, len(reachable), SCREEN_BATCH_SIZE)]

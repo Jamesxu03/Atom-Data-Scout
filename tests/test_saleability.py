@@ -310,8 +310,15 @@ def test_old_source_labels_load():
     assert old.pick("sources").values == [READY, UNTAPPED]
 
 
-def test_archetypes_stay_an_internal_checklist():
+def test_archetypes_lead_with_holders_and_name_the_tools_to_mine():
     audio = archetypes.guide(["Audio/speech"])
     assert "- Kept by law: regulation makes it record" in audio and "fleet dashcams" not in audio
+    assert "in scope only when it is distressed, has shared data before, or a law now allows reuse" in audio
     assert "fleet dashcams" in archetypes.guide(["Video"])
-    assert "speech-to-text APIs" in archetypes.supplier_tools(["Audio/speech"])
+    service = audio.split("- Service by-product")[1].split("\n")[0]
+    assert service.index("enterprises and professional firms") < service.index("meeting and call-recording tools")
+    assert archetypes.supplier_tools(["Audio/speech"])[:3] == ["Gong", "NICE", "Verint"]
+    assert "speech-to-text APIs" in archetypes.supplier_families(["Audio/speech"])
+    assert "Samsara" in archetypes.supplier_tools(["Video", "Tabular records"])  # listed once
+    assert archetypes.supplier_tools(["Video", "Tabular records"]).count("Samsara") == 1
+    assert [a.key for a in archetypes.with_examples(["Text"])][-1] == "community"

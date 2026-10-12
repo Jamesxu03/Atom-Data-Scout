@@ -10,6 +10,7 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, ValidationError
 
+from worker import config
 from worker.config import MODEL, THINKING_LEVEL
 
 load_dotenv()
@@ -25,10 +26,12 @@ def _client() -> genai.Client:
     key = os.getenv("GEMINI_API_KEY")
     if not key:
         raise RuntimeError("GEMINI_API_KEY is empty — fill it in .env")
-    # attempts=1: no hidden SDK retries — ask() owns retrying, so each failure costs one request
+    # attempts=1: no hidden SDK retries — ask() owns retrying, so each failure costs one request.
+    # A timeout raises like a dropped connection, so ask() retries it.
     return genai.Client(
         api_key=key,
-        http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)),
+        http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1),
+                                       timeout=config.LLM_TIMEOUT_SECONDS * 1000),
     )
 
 
@@ -56,6 +59,21 @@ def _is_hard_quota(e: Exception) -> bool:
     return "per day" in msg or "limit: 0" in msg
 
 
+def step(name: str) -> dict[str, str]:
+    """The model and thinking level configured for a step (config.STEP_MODELS / STEP_THINKING),
+    read at call time so an experiment can swap them: llm.ask(prompt, Schema, **llm.step("screen"))."""
+    return {"model": config.STEP_MODELS[name], "thinking": config.STEP_THINKING[name]}
+
+
+def search_queries(interaction) -> list[str]:
+    """The Google Search queries Gemini ran for a grounded answer; empty when not reported."""
+    out = []
+    for s in getattr(interaction, "steps", None) or []:
+        if getattr(s, "type", None) == "google_search_call":
+            out += list(getattr(getattr(s, "arguments", None), "queries", None) or [])
+    return out
+
+
 def ask(
     prompt: str,
     schema: type[T],
@@ -63,8 +81,10 @@ def ask(
     use_search: bool = False,
     system: str | None = None,
     thinking: str | None = THINKING_LEVEL,
+    queries: list[str] | None = None,
 ) -> T:
-    """Send prompt to Gemini and return its answer parsed into `schema`.
+    """Send prompt to Gemini and return its answer parsed into `schema`. With `queries`, the
+    search queries Gemini ran are appended to it.
 
     Retries bad JSON, timeouts, connection errors, 5xx, per-minute 429s and output blocked for
     recitation (long word-for-word quotes). Raises at once on
@@ -90,7 +110,10 @@ def ask(
     for attempt in range(RETRIES + 1):
         try:
             interaction = _client().interactions.create(**body)
-            return schema.model_validate_json(interaction.output_text or "")
+            result = schema.model_validate_json(interaction.output_text or "")
+            if queries is not None:
+                queries.extend(search_queries(interaction))
+            return result
         except ValidationError as e:  # model output didn't match the schema — worth another go
             last_error = e
             delay = 1
@@ -103,7 +126,8 @@ def ask(
             last_error = e
             delay = 5 * (attempt + 1) if status == 429 else 2**attempt
         if attempt < RETRIES:
-            print(f"  [llm] attempt {attempt + 1} failed ({type(last_error).__name__}), retrying")
+            print(f"  [llm] attempt {attempt + 1} failed ({type(last_error).__name__}: {str(last_error)[:120]}), "
+                  "retrying", flush=True)
             time.sleep(delay)
 
     if http_status(last_error) == 429:
