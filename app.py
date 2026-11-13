@@ -23,6 +23,7 @@ a search that is confirming saves new verdicts.
 import streamlit as st
 
 from ui.nav import COMPANIES_PAGE, SEARCH_PAGE, sidebar
+from worker import llm
 
 LOGO = "assets/atom_logo.png"
 ICON = "assets/atom_icon.png"  # square: a wide logo gets squeezed into the browser tab's favicon
@@ -34,5 +35,8 @@ page = st.navigation([
     st.Page(COMPANIES_PAGE, title="Companies", icon=":material/apartment:"),
 ], position="top")
 st.title("Atom Data Scout")
+if not llm.has_key():
+    st.warning("No Gemini API key found. Copy `.env.example` to `.env`, add your `GEMINI_API_KEY` and restart. "
+               "Past searches still open; new searches, research and email drafts need the key.")
 sidebar()
 page.run()

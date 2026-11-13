@@ -50,11 +50,14 @@ def start_job(kind: str, path: str, work: Callable[[Job], None]) -> None:
             work(job)
         except Exception as e:
             job.error = f"{type(e).__name__}: {e}"
-            s = sessions.load(path)  # keep what was saved, and say why it stopped
-            if kind == "search":
-                s.meta.stage = "failed"
-            s.meta.errors.append(f"{kind} failed: {job.error[:300]}")
-            sessions.save(s)
+            try:  # keep what was saved, and say why it stopped
+                s = sessions.load(path)
+                if kind == "search":
+                    s.meta.stage = "failed"
+                s.meta.errors.append(f"{kind} failed: {job.error[:300]}")
+                sessions.save(s)
+            except Exception as save_error:  # an unreadable session must not hide the first error
+                job.error += f" (and the session could not be updated: {type(save_error).__name__})"
         finally:
             job.finished = time.time()
             job.done = True

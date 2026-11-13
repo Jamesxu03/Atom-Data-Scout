@@ -55,10 +55,10 @@ from worker.discovery.channels import GROUNDING_REDIRECT, mention_at
 from worker.llm import QuotaExceeded
 from worker.parallel import run_parallel
 from worker.schemas import FACTS, Answer, Candidate, DataOwner, Fact, Saleability, Scores
-
-ArchetypeKey = Literal.__getitem__((*archetypes.BY_KEY, "none"))
 from worker.scoring import rescore
 from worker.verify import MIN_FACT_QUOTE_WORDS, quote_in_text, value_in_quote
+
+ArchetypeKey = Literal.__getitem__((*archetypes.BY_KEY, "none"))
 
 
 class Stated(BaseModel):

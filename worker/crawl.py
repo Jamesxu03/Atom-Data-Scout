@@ -8,6 +8,7 @@ Never raises for a bad site — failures are recorded in CrawlResult.errors.
 """
 
 import hashlib
+import ipaddress
 import os
 import re
 import tempfile
@@ -107,7 +108,25 @@ def _lock_for(url: str) -> threading.Lock:
         return _url_locks.setdefault(url, threading.Lock())
 
 
+def check_public(url: str) -> None:
+    """Raise ValueError unless url is http(s) to a public host. URLs come from search results and
+    Gemini, so one pointing at this machine or the local network is never fetched."""
+    parts = urlparse(url)
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or not host:
+        raise ValueError(f"not a web address: {url}")
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        raise ValueError(f"local address: {url}")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return  # a domain name
+    if not ip.is_global:
+        raise ValueError(f"private address: {url}")
+
+
 def _fetch_httpx(url: str) -> str:
+    check_public(url)
     with httpx.Client(follow_redirects=True, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT}) as c:
         r = c.get(url)
         r.raise_for_status()
@@ -129,6 +148,7 @@ class Browser:
         return self._thread.submit(self._render, url).result()
 
     def _render(self, url: str) -> str:
+        check_public(url)
         if self._browser is None:
             from playwright.sync_api import sync_playwright
 

@@ -21,11 +21,16 @@ RETRIES = 2  # extra attempts after the first
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 
 
+def has_key() -> bool:
+    """Whether GEMINI_API_KEY is set (in the environment or .env)."""
+    return bool(os.getenv("GEMINI_API_KEY", "").strip())
+
+
 @cache
 def _client() -> genai.Client:
-    key = os.getenv("GEMINI_API_KEY")
+    key = os.getenv("GEMINI_API_KEY", "").strip()
     if not key:
-        raise RuntimeError("GEMINI_API_KEY is empty — fill it in .env")
+        raise RuntimeError("GEMINI_API_KEY is empty: copy .env.example to .env and add your key")
     # attempts=1: no hidden SDK retries — ask() owns retrying, so each failure costs one request.
     # A timeout raises like a dropped connection, so ask() retries it.
     return genai.Client(

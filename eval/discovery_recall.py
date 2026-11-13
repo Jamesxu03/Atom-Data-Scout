@@ -101,7 +101,9 @@ def report(seeds: list[Seed], d: Discovery) -> str:
     matches = match(seeds, d.candidates)
     found = [m for m in matches if m.candidate]
     n = len(seeds)
-    pct = lambda k: f"{k}/{n} ({100 * k / n:.0f}%)"
+
+    def pct(k: int) -> str:
+        return f"{k}/{n} ({100 * k / n:.0f}%)"
 
     lines = [f"Discovery recall: {pct(len(found))} of seed companies found", "", "By channel:"]
     for ch in get_args(Channel):

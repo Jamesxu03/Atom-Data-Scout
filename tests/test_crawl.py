@@ -138,3 +138,20 @@ def test_crawl_fetches_policy_pages_side_by_side(monkeypatch):
     assert result.errors == []
     assert [p.url for p in result.pages()] == ["https://acme.com", "https://acme.com/privacy",
                                                "https://acme.com/terms", "https://acme.com/contact"]
+
+
+@pytest.mark.parametrize("url", [
+    "https://otter.ai/privacy", "http://example.co.uk", "https://8.8.8.8/page",
+])
+def test_check_public_allows_public_web_addresses(url):
+    crawl.check_public(url)
+
+
+@pytest.mark.parametrize("url", [
+    "file:///etc/passwd", "ftp://example.com/x", "https://", "http://localhost:8501", "http://app.localhost",
+    "http://127.0.0.1/admin", "http://10.0.0.5", "http://192.168.1.1/router", "http://169.254.169.254/latest",
+    "http://[::1]/", "http://printer.local", "http://db.internal",
+])
+def test_check_public_refuses_local_and_non_web_addresses(url):
+    with pytest.raises(ValueError):
+        crawl.check_public(url)
