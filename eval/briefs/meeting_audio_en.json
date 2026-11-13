@@ -1,0 +1,109 @@
+{
+  "description": "multi-speaker English meeting audio with transcripts and speaker labels",
+  "picks": {
+    "modality": {
+      "values": [
+        "Audio/speech"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "domain": {
+      "values": [
+        "Meetings/conversation"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "annotation": {
+      "values": [
+        "Rich labels"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "languages": {
+      "values": [
+        "English"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "volume": {
+      "values": [],
+      "amount": 1000.0,
+      "amount_to": null,
+      "unit": "hours",
+      "importance": "must",
+      "source": "stated"
+    },
+    "licence": {
+      "values": [
+        "Commercial, non-exclusive"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "nice",
+      "source": "inferred"
+    },
+    "permitted_use": {
+      "values": [
+        "Internal model training",
+        "Training for a commercial product"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "speakers": {
+      "values": [
+        "2",
+        "3 to 5",
+        "6+",
+        "Overlapping speech"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "speech_style": {
+      "values": [
+        "Spontaneous conversation"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "nice",
+      "source": "inferred"
+    },
+    "transcript": {
+      "values": [
+        "Clean transcript",
+        "Speaker labels"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    }
+  },
+  "notes": ""
+}

@@ -59,11 +59,25 @@ def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip(" .'\u2026")
 
 
+# Scripts written without spaces between words: Chinese, Japanese, Thai, Lao, Burmese, Khmer
+NO_SPACE_SCRIPT = re.compile(
+    "[฀-໿က-႟ក-៿぀-ヿ㐀-䶿一-鿿豈-﫿]+")
+CHARS_PER_WORD = 2  # a rough word length in those scripts, so a short phrase can't pass as a sentence
+
+
+def word_count(text: str) -> int:
+    """Words separated by spaces, plus one per CHARS_PER_WORD characters in scripts that don't
+    use spaces (a Japanese sentence would otherwise be one "word")."""
+    runs = NO_SPACE_SCRIPT.findall(text)
+    rest = NO_SPACE_SCRIPT.sub(" ", text)
+    return len(rest.split()) + sum(len(r) for r in runs) // CHARS_PER_WORD
+
+
 def quote_in_text(quote: str, text: str, min_words: int = MIN_QUOTE_WORDS) -> bool:
     """The quote appears in plain text, ignoring case, spacing, double quotes and curly
     apostrophes. Quotes of fewer than min_words words never count."""
     q = _normalise(quote)
-    if len(q.split()) < min_words:
+    if word_count(q) < min_words:
         return False
     text = _normalise(text)
     # the model often joins two passages with "..." — each part must be on the page

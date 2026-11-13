@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pydantic import BaseModel
 
 from worker import llm
-from worker.config import CONTACTS_PER_COMPANY, MODEL, PARALLEL_FETCHES
+from worker.config import CONTACTS_PER_COMPANY, PARALLEL_FETCHES
 from worker.crawl import CrawlResult, fetch_html, fetch_html_quick
 from worker.discovery.domains import normalize_domain
 from worker.schemas import Candidate, Contact
@@ -132,7 +132,7 @@ def verify(c: Contact, html_for: Callable[[str], str] | None = None) -> bool:
 def from_search(candidate: Candidate, verifier: Callable[[Contact], bool] | None = None) -> list[Contact]:
     verifier = verifier or verify
     prompt = PROMPT.format(name=candidate.name, website=candidate.website, n=CONTACTS_PER_COMPANY)
-    found = llm.ask(prompt, FoundContacts, model=MODEL, use_search=True).contacts
+    found = llm.ask(prompt, FoundContacts, use_search=True, **llm.step("contacts")).contacts
     out = []
     for f in found[:CONTACTS_PER_COMPANY]:
         if not (f.name or f.email or f.phone):

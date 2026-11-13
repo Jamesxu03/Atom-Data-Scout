@@ -4,12 +4,14 @@ from typing import get_args
 from tests.test_hypotheses import BRIEF
 from worker.brief_template import (
     CATEGORIES,
+    COLLECTION_OK,
     COMMERCIAL,
+    EXISTING_ONLY,
     FILL_PARTS,
     OPEN_CONDITIONS,
     SECTIONS,
-    BriefFillData,
-    BriefFillDeal,
+    Brief,
+    BriefFill,
     Pick,
     from_legacy,
     suggested_languages,
@@ -19,7 +21,7 @@ from worker.steps.brief import draft_brief
 
 
 def _fill(**picks) -> dict:
-    """Both halves of the fill, every category not_set except those given."""
+    """The fill, every category not_set except those given."""
     extra = {"description": "multi-speaker meeting audio", "notes": "", "questions": ["Which dialects?"]}
     out = {}
     for schema in FILL_PARTS:
@@ -38,7 +40,7 @@ def test_stated_values_kept_inferred_flagged_and_never_required(fake_ask):
         region={"status": "inferred", "values": ["Middle East (GCC)"], "other": ["Oman"]},
         volume={"status": "must", "amount": 2_000_000, "unit": "data points"},
         speakers={"status": "inferred", "values": ["3 to 5"]},
-        budget={"status": "not_set", "value": "Under £10k"},
+        deal_terms={"status": "not_set", "value": "Budget under £10k"},
     )
     text = "Arturo wants 2 million data points of Gulf Arabic meeting audio."
     draft = draft_brief(text)
@@ -51,20 +53,19 @@ def test_stated_values_kept_inferred_flagged_and_never_required(fake_ask):
     assert b.pick("region") == Pick(values=["Middle East (GCC)", "Oman"], importance="nice", source="inferred")
     assert b.pick("speakers").source == "inferred"
     assert (b.pick("volume").amount, b.pick("volume").unit, b.must("volume")) == (2_000_000, "data points", True)
-    assert "budget" not in b.picks  # not_set is dropped even if a value came back
+    assert "deal_terms" not in b.picks  # not_set is dropped even if a value came back
     assert draft.questions == ["Which dialects?"]
-    assert {c.schema for c in fake_ask.calls} == set(FILL_PARTS)  # two calls, one per half
+    assert [c.schema for c in fake_ask.calls] == [BriefFill]  # the whole template in one call
     assert all(text in c.prompt and '"inferred"' in c.prompt and "- speakers: AU1" in c.prompt
                for c in fake_ask.calls)
 
 
 def test_schema_offers_only_the_template_choices():
-    data, deal = BriefFillData.model_json_schema(), BriefFillDeal.model_json_schema()
+    data = BriefFill.model_json_schema()
     speakers = data["$defs"]["Pick_speakers"]["properties"]["values"]["items"]["enum"]
     assert speakers == list(CATEGORIES["speakers"].choices)
-    assert set(data["properties"]) | set(deal["properties"]) >= set(CATEGORIES)  # every category, once
-    assert not set(data["properties"]) & set(deal["properties"])
-    statuses = get_args(BriefFillData.model_fields["modality"].annotation.model_fields["status"].annotation)
+    assert set(data["properties"]) >= set(CATEGORIES)  # every category
+    statuses = get_args(BriefFill.model_fields["modality"].annotation.model_fields["status"].annotation)
     assert statuses == ("must", "nice", "inferred", "not_set")
 
 
@@ -74,7 +75,7 @@ def test_every_category_is_well_formed():
     for cat in CATEGORIES.values():
         assert set(cat.used_for) <= set("SFRVE"), cat.key
         assert set(cat.neutral) <= set(cat.choices), cat.key
-        assert cat.choices or cat.pick in ("text", "years"), cat.key
+        assert cat.choices or cat.pick in ("text", "years", "paragraph"), cat.key
 
 
 def test_summary_groups_by_importance_and_use():
@@ -82,9 +83,9 @@ def test_summary_groups_by_importance_and_use():
     assert s.startswith("Multi-speaker meeting audio. Must have — Modality: Audio/speech. Nice to have — ")
     assert "Volume target: 1,000 hours" in s and "Speakers per recording: 3 to 5" in s
     assert "Volume target" not in BRIEF.summary("S")  # C1 isn't used for search
-    email = BRIEF.model_copy(update={"picks": {**BRIEF.picks, "budget": Pick(values=["Under £10k"], importance="any")}})
-    assert "Also — Budget: Under £10k" in email.summary("E")  # the email uses values whatever the importance
-    assert "Budget" not in email.summary("SFR")
+    terms = BRIEF.model_copy(update={"picks": {**BRIEF.picks, "deal_terms": Pick(values=["Sample first"])}})
+    assert "Deal terms: Sample first" in terms.summary("E") and "Deal terms" in terms.summary("FRV")
+    assert "Deal terms" not in terms.summary("SFR")  # never used to screen
 
 
 def test_add_ons_only_for_the_modality_picked():
@@ -96,11 +97,37 @@ def test_add_ons_only_for_the_modality_picked():
 
 def test_language_suggestions_and_transfer_flags():
     assert "Gulf Arabic" in suggested_languages(["Middle East (GCC)"])
-    (saudi,) = transfer_flags(["Middle East (GCC)"], ["UK"])
+    (saudi,) = transfer_flags(["Middle East (GCC)"])
     assert "PDPL" in saudi
-    assert any("China" in f for f in transfer_flags(["china"], []))
-    assert transfer_flags(["EU/EEA"], ["EU/EEA"]) == [] and transfer_flags(["EU/EEA"], ["US"])
-    assert transfer_flags(["UK"], ["US"]) == []
+    assert any("China" in f for f in transfer_flags(["china"]))
+    assert transfer_flags(["EU/EEA"]) and transfer_flags(["UK"]) == []
+
+
+def test_brief_saved_with_the_older_template_is_upgraded():
+    b = Brief.model_validate({"description": "meeting audio", "notes": "Meetings only.", "picks": {
+        "languages": {"values": ["English"], "importance": "must"},
+        "licence": {"values": [COMMERCIAL], "importance": "any"},  # counted for nothing: dropped
+        "transcript": {"values": ["Verbatim"], "importance": "nice"},
+        "speaker_labels": {"values": ["Needed"], "importance": "must"},
+        "overlap": {"values": ["Required"], "importance": "nice"},
+        "environment": {"values": ["Office/meeting room"]},
+        "production": {"values": ["Any"]},  # no preference: nothing to keep
+        "delivery": {"values": ["One-off dataset"], "importance": "must"},
+        "personal_data": {"values": ["Anonymised only"], "importance": "must"},
+        "budget": {"values": ["Under £10k"]},
+        "made_up": {"values": ["x"]},
+    }})
+    assert set(b.picks) == {"languages", "transcript", "speakers", "collection", "deal_terms"}
+    assert b.pick("transcript") == Pick(values=["Verbatim transcript", "Speaker labels"], importance="must")
+    assert b.pick("speakers").values == ["Overlapping speech"]
+    assert b.pick("collection") == Pick(values=[EXISTING_ONLY], importance="must")
+    # a must-have research check (personal data) makes the deal terms a must have
+    assert b.pick("deal_terms") == Pick(values=["Personal data: Anonymised only"], importance="must")  # no budget
+    assert b.notes == "Meetings only; Environment: Office/meeting room"
+    assert Brief.model_validate(b.model_dump()) == b  # today's briefs pass through unchanged
+    custom = Brief.model_validate({"description": "x", "picks": {
+        "delivery": {"values": ["Recurring feed", "Custom collection to order"]}}})
+    assert custom.pick("collection") == Pick(values=[COLLECTION_OK])
 
 
 def test_legacy_brief_is_converted():

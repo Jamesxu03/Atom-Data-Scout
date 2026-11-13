@@ -6,6 +6,9 @@ Run: uv run python -m eval.discovery_recall [session_dir]   (defaults to the new
 Matches by domain; seeds with no website are matched by name. Rank positions are in the
 session's ranked list (1 = top), so they show whether the known-good companies end up near
 the top.
+
+Also measures what the search is for: how many of the untapped companies are real holders
+rather than tool vendors (whose customers hold the data), and how many holders reach the top 25.
 """
 
 import csv
@@ -29,7 +32,7 @@ SEEDS_CSV = Path(__file__).parent / "seed_companies.csv"
 class Seed(BaseModel):
     name: str
     website: str = ""
-    type: str = ""  # expected holder type: seller, collector, untapped, public, technology
+    type: str = ""  # expected type: ready, untapped (a holder) or vendor (untapped, makes the tool)
     notes: str = ""
 
 
@@ -46,8 +49,10 @@ def load_seeds(path: Path = SEEDS_CSV) -> list[Seed]:
 
 
 def _norm_name(name: str) -> str:
+    """Lowercased, without legal suffixes or punctuation; letters of any script are kept, so
+    two different Japanese or Arabic names never both become ""."""
     name = re.sub(r"\b(ltd|limited|inc|plc|llc|gmbh|corp|co)\b\.?", "", name.lower())
-    return re.sub(r"[^a-z0-9]", "", name)
+    return re.sub(r"[\W_]", "", name)
 
 
 def match(seeds: list[Seed], candidates: list[Candidate]) -> list[SeedMatch]:
@@ -65,6 +70,23 @@ def match(seeds: list[Seed], candidates: list[Candidate]) -> list[SeedMatch]:
     return out
 
 
+def screened_type(c: Candidate) -> str | None:
+    """The screen's type in the seed file's terms: tool vendors are their own type."""
+    return "vendor" if c.vendor else c.holder_type
+
+
+def holder_lines(d: Discovery, top: int = 25) -> list[str]:
+    """Share of tool vendors among untapped companies, and real holders near the top."""
+    untapped = [c for c in d.candidates if c.holder_type == "untapped" and not c.excluded]
+    if not untapped:
+        return []
+    vendors = sum(c.vendor for c in untapped)
+    holders = [c for c in rank(d.candidates)[:top] if c.holder_type == "untapped" and not c.vendor and not c.excluded]
+    share = f"{100 * vendors / len(untapped):.0f}%"
+    return ["", f"Untapped companies: {len(untapped)}, of which tool vendors: {vendors} ({share})",
+            f"Untapped holders (not vendors) in the top {top}: {len(holders)}"]
+
+
 def _screen_outcome(c: Candidate) -> str:
     if c.excluded:
         return "excluded"
@@ -79,7 +101,9 @@ def report(seeds: list[Seed], d: Discovery) -> str:
     matches = match(seeds, d.candidates)
     found = [m for m in matches if m.candidate]
     n = len(seeds)
-    pct = lambda k: f"{k}/{n} ({100 * k / n:.0f}%)"
+
+    def pct(k: int) -> str:
+        return f"{k}/{n} ({100 * k / n:.0f}%)"
 
     lines = [f"Discovery recall: {pct(len(found))} of seed companies found", "", "By channel:"]
     for ch in get_args(Channel):
@@ -93,10 +117,12 @@ def report(seeds: list[Seed], d: Discovery) -> str:
 
     typed = [m for m in found if m.seed.type]
     if typed:
-        wrong = [m for m in typed if m.candidate.holder_type != m.seed.type]
+        wrong = [m for m in typed if screened_type(m.candidate) != m.seed.type]
         lines += ["", f"Holder type matches the expected one for {len(typed) - len(wrong)}/{len(typed)} found seeds"]
-        lines += [f"  - {m.seed.name}: expected {m.seed.type}, screened {m.candidate.holder_type or 'unscreened'}"
+        lines += [f"  - {m.seed.name}: expected {m.seed.type}, screened {screened_type(m.candidate) or 'unscreened'}"
                   for m in wrong]
+
+    lines += holder_lines(d)
 
     ranks = sorted(m.rank for m in found)
     if ranks:

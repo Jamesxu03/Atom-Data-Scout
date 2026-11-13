@@ -7,8 +7,13 @@ Where the tool uses a category ("used for" codes):
   S  search queries        F  screening filter      R  ranking score
   V  checked during deep research                   E  outreach email
 
-Every category also has an importance: must (hard cap when evidence contradicts it), nice
-(weighted into the score) or any (ignored). Unknown evidence stays neutral.
+A category that is filled in counts (nice to have); its Must switch makes it a hard cap when
+evidence contradicts it. An empty category is ignored. Unknown evidence stays neutral.
+
+The template only asks what changes who is found or how they rank. Deal terms that only research
+and the email use go in one Deal terms text (F1); details too fine for a category go in the
+notes, which the screen also reads. Briefs saved with the older, longer template are upgraded on
+load (see _upgrade_picks).
 """
 
 from dataclasses import dataclass
@@ -16,9 +21,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, create_model, model_validator
 
-PickType = Literal["single", "multi", "amount", "years", "text"]
-Importance = Literal["must", "nice", "any"]
-IMPORTANCE_LABELS = {"must": "Must have", "nice": "Nice to have", "any": "Any"}
+PickType = Literal["single", "multi", "amount", "years", "text", "paragraph"]
+Importance = Literal["must", "nice", "any"]  # any: the category is empty, so it counts for nothing
 CODE_LABELS = {"S": "search", "F": "filter", "R": "ranking", "V": "research", "E": "email"}
 
 
@@ -46,23 +50,20 @@ class Section:
 # Choices other code refers to by name
 AUDIO, VIDEO, IMAGE, TEXT = "Audio/speech", "Video", "Image", "Text"
 TABULAR, SENSOR, GEO = "Tabular records", "Time series/sensor", "Geospatial"
-SELLERS = "Data sellers (existing datasets)"
-COLLECTORS = "Data collectors (record to order)"
-MARKETPLACES = "Marketplace listings"
-PUBLIC_BODIES = "Open repositories and public bodies"
-RESEARCH_INSTITUTES = "Research institutes and universities"
-UNTAPPED = "Untapped holders (own data, not selling it)"
-DISTRESSED = "Distressed, closed or for-sale companies"
-TECHNOLOGY = "Technology providers with internal data"
+READY = "Ready sources (sellers, marketplace listings, public datasets, collectors)"
+UNTAPPED = "Untapped holders (have the data, not selling it)"
 OPEN, OPEN_CONDITIONS, RESTRICTED = "Public domain / Open", "Open with conditions", "Restricted / Conditional"
 COMMERCIAL, EXCLUSIVE, UNCLEAR = "Commercial, non-exclusive", "Commercial, exclusive", "Unclear"
 INTERNAL_ONLY = "Internal use only"  # found by research only; never acceptable
-CUSTOM_COLLECTION = "Custom collection to order"
-# E1 labels from before sellers, collectors and untapped holders were split
+COLLECTION_OK, EXISTING_ONLY = "Welcome", "Existing data only"
+# E1 labels from earlier versions of the template -> today's
 _OLD_SOURCE_LABELS = {
-    "Data vendors and collection companies": [SELLERS, COLLECTORS],
-    "By-product holders (their service generates the data)": [UNTAPPED],
-    "Distressed or insolvent companies": [DISTRESSED],
+    **dict.fromkeys(["Data vendors and collection companies", "Data sellers (existing datasets)",
+                     "Data collectors (record to order)", "Marketplace listings", "Open repositories and public bodies",
+                     "Research institutes and universities"], (READY,)),
+    **dict.fromkeys(["By-product holders (their service generates the data)", "Untapped holders (own data, not selling it)",
+                     "Distressed or insolvent companies", "Distressed, closed or for-sale companies",
+                     "Technology providers with internal data"], (UNTAPPED,)),
 }
 CUSTOMER_EXCLUDE, CUSTOMER_CONSENT, CUSTOMER_LATER = (
     "Exclude", "Accept if customer consent can be obtained", "Accept, check later")
@@ -75,42 +76,30 @@ SECTIONS: tuple[Section, ...] = (
                  ("Meetings/conversation", "Call centre/support", "Broadcast/media", "Healthcare",
                   "Legal/public sector", "Retail/e-commerce", "Automotive/mobility", "Industrial/IoT",
                   "Environment/waste", "Finance"), free_text=True, help="Type your own if none fits"),
-        Category("production", "A3", "How it was produced", "multi", "SF",
-                 ("Natural (captured in normal operations)", "Prompted/scripted collection", "Synthetic", "Any"),
-                 neutral=("Any",)),
-        Category("annotation", "A4", "Minimum annotation", "single", "FR",
+        Category("annotation", "A3", "Minimum annotation", "single", "FR",
                  ("Raw, no labels", "Basic labels", "Rich labels", "Expert-verified labels")),
-        Category("quality", "A5", "Quality evidence", "single", "VE",
-                 ("None needed", "Seller's QA description", "Measured metrics (e.g. WER, inter-annotator agreement)",
-                  "Sample we test ourselves"), neutral=("None needed",)),
     )),
-    Section("B", "Where and who", (
+    Section("B", "Where", (
         Category("region", "B1", "Region of origin", "multi", "SFR",
                  ("Global", "UK", "EU/EEA", "North America", "Latin America", "Middle East (GCC)",
                   "Middle East and North Africa", "Sub-Saharan Africa", "South Asia", "East Asia",
                   "Southeast Asia", "Oceania"), free_text=True, neutral=("Global",),
                  help="Type specific countries if you need them"),
         Category("languages", "B2", "Languages and dialects", "text", "SFR", free_text=True,
-                 help="Suggestions follow the regions picked; type your own, e.g. Gulf Arabic"),
-        Category("code_switching", "B3", "Code-switching", "single", "F", ("Not allowed", "Acceptable", "Wanted")),
-        Category("demographics", "B4", "Demographic coverage", "single", "VE",
-                 ("Not needed", "Balanced (gender, age bands)", "Set quotas", "Metadata per sample"),
-                 neutral=("Not needed",)),
+                 help="Suggestions follow the regions picked; type your own, e.g. Gulf Arabic or "
+                      "Hinglish (code-switching)"),
     )),
-    Section("C", "Volume and delivery", (
+    Section("C", "Volume and timing", (
         Category("volume", "C1", "Volume target", "amount", "RVE",
                  ("hours", "recordings", "records/rows", "images", "video hours", "documents", "tokens", "GB",
-                  "data points")),
-        Category("seller_share", "C2", "Minimum from one seller", "single", "R",
-                 ("100% of target", "50%", "10%", "Any amount (we combine sellers)"),
-                 help="A seller holding 10% of the target is still useful if you combine several sellers"),
-        Category("recency", "C3", "Recency", "single", "FV",
+                  "data points"),
+                 help="The total: several sellers can be combined to reach it"),
+        Category("recency", "C2", "Recency", "single", "FV",
                  ("Any", "Last 5 years", "Last 2 years", "Last 12 months", "Live/ongoing"), neutral=("Any",)),
-        Category("delivery", "C4", "Delivery type", "multi", "SFE",
-                 ("One-off dataset", "Recurring feed", "API access", CUSTOM_COLLECTION),
-                 help="Must have without custom collection rules out data collectors"),
+        Category("collection", "C3", "Data recorded to order", "single", "SFE", (COLLECTION_OK, EXISTING_ONLY),
+                 help="Welcome: also search data collectors. Existing data only, as a must have, caps collectors"),
     )),
-    Section("D", "Rights and compliance", (
+    Section("D", "Rights", (
         Category("licence", "D1", "Acceptable licence", "multi", "FRV",
                  (OPEN, OPEN_CONDITIONS, RESTRICTED, COMMERCIAL, EXCLUSIVE, UNCLEAR),
                  help="Public domain / Open: CC0, public domain, open government data. Open with conditions: "
@@ -119,95 +108,57 @@ SECTIONS: tuple[Section, ...] = (
         Category("permitted_use", "D2", "Permitted use needed", "multi", "VE",
                  ("Evaluation only", "Internal model training", "Fine-tuning", "Training for a commercial product",
                   "Retrieval/RAG", "Resale or redistribution")),
-        Category("exclusivity", "D3", "Exclusivity", "single", "E",
-                 ("Not needed", "Preferred", "Field-of-use exclusive required", "Fully exclusive required")),
-        Category("term", "D4", "Term", "single", "E",
-                 ("Any", "Perpetual", "Fixed term, trained models may be kept",
-                  "Fixed term, data and models deleted after")),
-        Category("personal_data", "D5", "Personal data", "single", "FV",
-                 ("None allowed", "Anonymised only", "Pseudonymised acceptable",
-                  "Identifiable with documented consent"),
-                 help="Voice or face data used to identify people is biometric: only "
-                      "'Identifiable with documented consent' fits"),
-        Category("customer_data", "D6", "Data the seller holds for its customers", "single", "FR",
+        Category("customer_data", "D3", "Data the seller holds for its customers", "single", "FR",
                  (CUSTOMER_EXCLUDE, CUSTOMER_CONSENT, CUSTOMER_LATER),
                  help="e.g. a company recording its clients' customer-support calls"),
-        Category("documents", "D7", "Documents required", "multi", "VE",
-                 ("Licence agreement", "Per-person consent records", "Data processing agreement",
-                  "Datasheet/metadata", "Source details for EU AI Act summary", "Warranties and indemnity")),
-        Category("processing", "D8", "Where the buyer will process it", "single", "V",
-                 ("UK", "EU/EEA", "US", "Middle East", "Asia", "Other"),
-                 help="Flags origin regions that restrict transfers, e.g. China, Saudi Arabia"),
     )),
     Section("E", "Where to look", (
         Category("sources", "E1", "Source types", "multi", "SF",
-                 (SELLERS, COLLECTORS, MARKETPLACES, PUBLIC_BODIES, RESEARCH_INSTITUTES, UNTAPPED, DISTRESSED,
-                  TECHNOLOGY),
-                 help="Empty searches everywhere. Must have also drops companies of other types."),
+                 (READY, UNTAPPED),
+                 help="Empty searches for both. Must have also drops companies of the other type."),
         Category("exclusions", "E2", "Exclusions", "text", "F", free_text=True,
                  help="Companies or domains to skip (already contacted, the buyer's competitors)"),
     )),
-    Section("F", "Commercial", (
-        Category("budget", "F1", "Budget", "single", "E",
-                 ("Unknown", "Under £10k", "£10k to £50k", "£50k to £250k", "Over £250k"), neutral=("Unknown",)),
-        Category("pricing", "F2", "Pricing model", "multi", "E",
-                 ("Any", "Flat fee", "Per unit", "Recurring", "Revenue share"), neutral=("Any",)),
-        Category("timeline", "F3", "Timeline", "single", "E",
-                 ("Under 1 month", "1 to 3 months", "3 to 6 months", "Flexible"), neutral=("Flexible",)),
-        Category("sample", "F4", "Sample before purchase", "single", "E", ("Required", "Preferred", "Not needed"),
-                 neutral=("Not needed",)),
+    Section("F", "Deal terms", (
+        Category("deal_terms", "F1", "Deal terms", "paragraph", "VE",
+                 help="Checked in research and asked about in the email, never used to screen: personal "
+                      "data and consent, people in frame, exclusivity, term, documents, quality evidence, "
+                      "demographics, where the buyer will process the data, pricing, timeline, sample "
+                      "(not the budget: the email would see it). Must have caps the fit when research finds the terms can't be met."),
     )),
     Section("AUDIO", "Audio/speech details", (
-        Category("speakers", "AU1", "Speakers per recording", "multi", "FR", ("1", "2", "3 to 5", "6+")),
-        Category("overlap", "AU2", "Overlapping speech", "single", "FR", ("None", "Some", "Required")),
-        Category("speech_style", "AU3", "Speech style", "multi", "SFR",
+        Category("speakers", "AU1", "Speakers per recording", "multi", "FR",
+                 ("1", "2", "3 to 5", "6+", "Overlapping speech")),
+        Category("speech_style", "AU2", "Speech style", "multi", "SFR",
                  ("Spontaneous conversation", "Call centre", "Read/scripted", "Broadcast")),
-        Category("audio_quality", "AU4", "Audio quality", "multi", "FR",
+        Category("audio_quality", "AU3", "Audio quality", "multi", "FR",
                  ("Telephone (8 kHz)", "Wideband (16 kHz+)", "Studio (44.1/48 kHz)", "Any"), neutral=("Any",)),
-        Category("channels", "AU5", "Channels", "multi", "FR",
-                 ("Mono", "One channel per speaker", "Multi-mic/far-field")),
-        Category("environment", "AU6", "Environment", "multi", "FR",
-                 ("Quiet", "Office/meeting room", "Noisy/public", "In-car", "Mixed")),
-        Category("transcript", "AU7", "Transcript", "single", "FR", ("None", "Clean", "Verbatim")),
-        Category("timestamps", "AU8", "Timestamps", "single", "FR", ("None", "Utterance", "Word")),
-        Category("speaker_labels", "AU9", "Speaker labels", "single", "FR", ("Not needed", "Needed"),
-                 neutral=("Not needed",)),
+        Category("transcript", "AU4", "Transcript", "multi", "FR",
+                 ("Clean transcript", "Verbatim transcript", "Utterance timestamps", "Word timestamps",
+                  "Speaker labels")),
     ), modalities=(AUDIO,)),
     Section("VISUAL", "Video/image details", (
         Category("viewpoint", "VI1", "Viewpoint", "multi", "SFR",
                  ("First-person", "Handheld third-person", "Fixed camera", "Dashcam", "Aerial")),
-        Category("resolution", "VI2", "Minimum resolution", "single", "FR", ("Any", "720p", "1080p", "4K"),
-                 neutral=("Any",)),
-        Category("visual_labels", "VI3", "Labels", "multi", "FR",
+        Category("visual_labels", "VI2", "Labels", "multi", "FR",
                  ("Captions", "Tags", "Bounding boxes", "Segmentation", "Pose", "Actions/events")),
-        Category("people_in_frame", "VI4", "People in frame", "single", "FV",
-                 ("None", "Blurred", "Identifiable with consent")),
     ), modalities=(VIDEO, IMAGE)),
     Section("TEXT", "Text details", (
         Category("genre", "TX1", "Genre", "multi", "SFR",
                  ("Chat/dialogue", "Documents/reports", "Web content", "Transcripts", "Code")),
-        Category("text_format", "TX2", "Format", "multi", "FR",
-                 ("Raw", "Cleaned", "Instruction/response pairs", "Q&A")),
     ), modalities=(TEXT,)),
     Section("RECORDS", "Tabular, sensor or geospatial details", (
         Category("entity_level", "TB1", "Entity level", "multi", "SFR",
                  ("Individual", "Household", "Facility/site", "Company", "City/region", "Country")),
-        Category("granularity", "TB2", "Granularity", "multi", "FR", ("Event", "Hourly", "Daily", "Monthly", "Annual")),
-        Category("coverage_period", "TB3", "Coverage period", "years", "FR", help="From and to years"),
-        Category("geocoding", "TB4", "Geo-coding", "single", "FR", ("Not needed", "Region", "Precise coordinates"),
-                 neutral=("Not needed",)),
+        Category("coverage_period", "TB2", "Coverage period", "years", "FR", help="From and to years"),
     ), modalities=(TABULAR, SENSOR, GEO)),
 )
 
 CATEGORIES: dict[str, Category] = {c.key: c for s in SECTIONS for c in s.categories}
 SECTION_OF: dict[str, Section] = {c.key: s for s in SECTIONS for c in s.categories}
 
-# E1 choice -> the holder types (from the screen) it covers
-SOURCE_HOLDERS = {
-    SELLERS: {"seller"}, COLLECTORS: {"collector"}, MARKETPLACES: {"seller"}, PUBLIC_BODIES: {"public"},
-    RESEARCH_INSTITUTES: {"public"}, UNTAPPED: {"untapped"}, DISTRESSED: {"untapped", "seller"},
-    TECHNOLOGY: {"technology"},
-}
+# E1 choice -> the holder type (from the screen) it covers
+SOURCE_HOLDERS = {READY: "ready", UNTAPPED: "untapped"}
 
 # B1 region -> languages suggested for B2
 REGION_LANGUAGES = {
@@ -226,16 +177,99 @@ REGION_LANGUAGES = {
     "Oceania": ["Australian English", "New Zealand English", "Māori"],
 }
 
-# (origin regions or countries, processing locations it doesn't apply to, the rule)
+# (origin regions or countries, the rule). Where the buyer processes the data, if stated, is in
+# the deal terms, so research judges whether a rule applies.
 TRANSFER_RULES = [
-    ({"china", "east asia"}, set(),
-     "China: exporting personal data needs a security assessment or regulator approval."),
-    ({"saudi arabia", "middle east (gcc)", "middle east and north africa"}, set(),
+    ({"china", "east asia"}, "China: exporting personal data needs a security assessment or regulator approval."),
+    ({"saudi arabia", "middle east (gcc)", "middle east and north africa"},
      "Saudi Arabia (PDPL): sensitive personal data must stay in the country unless an exemption applies."),
-    ({"eu/eea"}, {"EU/EEA", "UK"},
-     ("EU/EEA: personal data leaving the EEA needs an adequacy decision or another transfer mechanism "
-      "(e.g. standard contractual clauses).")),
+    ({"eu/eea"}, ("EU/EEA: personal data leaving the EEA (other than to the UK) needs an adequacy decision or "
+                  "another transfer mechanism (e.g. standard contractual clauses).")),
 ]
+
+# --- briefs saved with the older, longer template ---------------------------------------------
+
+# Removed categories: key -> (label, choices that meant "no preference")
+_OLD_NOTES = {  # details of the data: into the notes, which the screen reads
+    "production": ("How it was produced", ("Any",)),
+    "code_switching": ("Code-switching", ()),
+    "seller_share": ("Minimum from one seller", ()),
+    "overlap": ("Overlapping speech", ()),
+    "channels": ("Channels", ()),
+    "environment": ("Environment", ()),
+    "resolution": ("Minimum resolution", ("Any",)),
+    "text_format": ("Text format", ()),
+    "granularity": ("Granularity", ()),
+    "geocoding": ("Geo-coding", ("Not needed",)),
+}
+_OLD_TERMS = {  # into F1 Deal terms. The old F1 Budget is dropped: it was never passed on
+    "personal_data": ("Personal data", ()),
+    "people_in_frame": ("People in frame", ()),
+    "quality": ("Quality evidence", ("None needed",)),
+    "demographics": ("Demographic coverage", ("Not needed",)),
+    "documents": ("Documents required", ()),
+    "processing": ("Where the buyer will process it", ()),
+    "exclusivity": ("Exclusivity", ()),
+    "term": ("Term", ("Any",)),
+    "pricing": ("Pricing model", ("Any",)),
+    "timeline": ("Timeline", ("Flexible",)),
+    "sample": ("Sample before purchase", ("Not needed",)),
+}
+# The removed categories research used to check (a must have capped the fit): now F1's check
+OLD_CHECKS = {"personal_data", "people_in_frame", "quality", "demographics", "documents", "processing"}
+# AU7 to AU9 -> AU4 Transcript choices
+_OLD_TRANSCRIPT = {"transcript": {"Clean": "Clean transcript", "Verbatim": "Verbatim transcript"},
+                   "timestamps": {"Utterance": "Utterance timestamps", "Word": "Word timestamps"},
+                   "speaker_labels": {"Needed": "Speaker labels"}}
+_OLD_DELIVERY_CUSTOM = "Custom collection to order"
+
+
+def _upgrade_picks(data: dict) -> dict:
+    """A brief saved with the older template -> today's. Picks set to Any are dropped (they
+    counted for nothing); removed categories become a line in the notes or the deal terms, which
+    is a must have if a removed research check was. Briefs already in today's template pass
+    through unchanged."""
+    picks = {k: p.model_dump() if isinstance(p, BaseModel) else dict(p) for k, p in (data.get("picks") or {}).items()}
+    picks = {k: p for k, p in picks.items() if p.get("importance") != "any"}
+    notes, terms, terms_must = [], [], False
+
+    def take(key: str, neutral: tuple[str, ...] = ()) -> tuple[list[str], bool]:
+        p = picks.pop(key, None) or {}
+        return [v for v in p.get("values", []) if v not in neutral], p.get("importance") == "must"
+
+    if "delivery" in picks:  # C4 Delivery type -> C3 Data recorded to order
+        values, must = take("delivery")
+        if values:
+            picks["collection"] = {"values": [COLLECTION_OK if _OLD_DELIVERY_CUSTOM in values else EXISTING_ONLY],
+                                   "importance": "must" if must else "nice"}
+    if "Required" in picks.get("overlap", {}).get("values", []):
+        _, must = take("overlap")
+        speakers = picks.setdefault("speakers", {"values": [], "importance": "nice"})
+        speakers["values"] = [*speakers.get("values", []), "Overlapping speech"]
+        if must:
+            speakers["importance"] = "must"
+    merged, merged_must = [], False
+    for key, choices in _OLD_TRANSCRIPT.items():
+        if key == "transcript" and not set(picks.get(key, {}).get("values", [])) & {"None", *choices}:
+            continue  # already today's AU4
+        values, must = take(key)
+        merged += [choices.get(v, v) for v in values if v in choices or v in CATEGORIES["transcript"].choices]
+        merged_must |= must and any(v in choices for v in values)
+    if merged:
+        picks["transcript"] = {"values": list(dict.fromkeys(merged)), "importance": "must" if merged_must else "nice"}
+    for key, (label, neutral) in _OLD_NOTES.items():
+        if (values := take(key, neutral)[0]):
+            notes.append(f"{label}: {', '.join(values)}")
+    for key, (label, neutral) in _OLD_TERMS.items():
+        values, must = take(key, neutral)
+        if values:
+            terms.append(f"{label}: {', '.join(values)}")
+            terms_must |= must and key in OLD_CHECKS
+    if terms:
+        picks["deal_terms"] = {"values": ["; ".join(terms)], "importance": "must" if terms_must else "nice"}
+    if notes:
+        data = {**data, "notes": "; ".join(filter(None, [(data.get("notes") or "").strip().rstrip(".;"), *notes]))}
+    return {**data, "picks": {k: p for k, p in picks.items() if k in CATEGORIES}}
 
 
 # --- the saved brief --------------------------------------------------------------------------
@@ -247,7 +281,7 @@ class Pick(BaseModel):
     amount: float | None = None
     amount_to: float | None = None
     unit: str | None = None
-    importance: Importance = "nice"
+    importance: Literal["must", "nice"] = "nice"
     source: Literal["stated", "inferred"] = "stated"
 
 
@@ -259,6 +293,11 @@ class Brief(BaseModel):
     description: str = Field(description="What data, in a few words, e.g. multi-speaker meeting audio")
     picks: dict[str, Pick] = {}
     notes: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _upgrade_template(cls, data):
+        return _upgrade_picks(data) if isinstance(data, dict) else data
 
     @model_validator(mode="after")
     def _upgrade_sources(self):
@@ -283,11 +322,11 @@ class Brief(BaseModel):
         return bool(self.chosen(key))
 
     def importance(self, key: str) -> Importance:
-        """any when nothing (or only 'no preference') is picked."""
+        """any when nothing (or only 'no preference') is picked: it counts for nothing."""
         return self.pick(key).importance if self.is_set(key) else "any"
 
     def active(self, key: str) -> list[str]:
-        """Values that count for matching (S F R V): importance must or nice."""
+        """Values that count for matching (S F R V): those of a category that is set."""
         return self.chosen(key) if self.importance(key) != "any" else []
 
     def must(self, key: str) -> bool:
@@ -314,17 +353,11 @@ class Brief(BaseModel):
         return ", ".join(self.chosen(key))
 
     def volume_wanted(self) -> str:
-        """The target, and how much of it one seller needs to hold (C2)."""
-        if self.importance("volume") == "any":
-            return "any"
-        share = self.active("seller_share")
-        text = self.value_text("volume")
-        return f"{text} in total; one seller should hold {share[0]} of it" if share else text
+        return self.value_text("volume") or "any"
 
     def summary(self, codes: str | None = None) -> str:
-        """A readable paragraph. With `codes` (e.g. "SFR"), only categories used for those, and
-        only must/nice ones, except for E (the email uses every stated value)."""
-        must, nice, other = [], [], []
+        """A readable paragraph. With `codes` (e.g. "SFR"), only categories used for those."""
+        must, nice = [], []
         for s in SECTIONS:
             if s.modalities and s not in self.modality_sections():
                 continue
@@ -333,21 +366,12 @@ class Brief(BaseModel):
                     continue
                 if codes and not set(codes) & set(cat.used_for):
                     continue
-                item = f"{cat.label}: {self.value_text(cat.key)}"
-                importance = self.importance(cat.key)
-                if importance == "must":
-                    must.append(item)
-                elif importance == "nice":
-                    nice.append(item)
-                elif not codes or "E" in codes:
-                    other.append(item)
+                (must if self.must(cat.key) else nice).append(f"{cat.label}: {self.value_text(cat.key)}")
         parts = [self.description[:1].upper() + self.description[1:]]
         if must:
             parts.append("Must have — " + "; ".join(must))
         if nice:
             parts.append("Nice to have — " + "; ".join(nice))
-        if other:
-            parts.append("Also — " + "; ".join(other))
         if self.notes.strip():
             parts.append(f"Notes: {self.notes.strip()}")
         return ". ".join(p.rstrip(". ") for p in parts) + "."
@@ -356,14 +380,13 @@ class Brief(BaseModel):
         """E1 as a must-have filter: companies of other types are dropped."""
         if not self.must("sources") or holder_type is None:
             return True
-        return any(holder_type in SOURCE_HOLDERS[s] for s in self.active("sources"))
+        return any(holder_type == SOURCE_HOLDERS[s] for s in self.active("sources"))
 
 
-def transfer_flags(regions: list[str], processing: list[str]) -> list[str]:
-    """Rules that restrict moving data from these origin regions to where it will be processed."""
+def transfer_flags(regions: list[str]) -> list[str]:
+    """Rules that may restrict moving personal data out of these origin regions."""
     origin = {r.strip().lower() for r in regions}
-    return [rule for places, exempt, rule in TRANSFER_RULES
-            if origin & places and not (processing and set(processing) <= exempt)]
+    return [rule for places, rule in TRANSFER_RULES if origin & places]
 
 
 def suggested_languages(regions: list[str]) -> list[str]:
@@ -395,6 +418,8 @@ def _pick_model(cat: Category) -> type[BaseModel]:
     elif cat.pick == "years":
         fields["from_year"] = (int | None, None)
         fields["to_year"] = (int | None, None)
+    elif cat.pick == "paragraph":
+        fields["value"] = (str | None, None)
     else:
         fields["values"] = (list[str], [])
     return create_model(f"Pick_{cat.key}", **fields)
@@ -409,17 +434,12 @@ def _fill_model(name: str, sections: list[Section], extra: dict) -> type[BaseMod
     return create_model(name, **fields)
 
 
-# Gemini rejects the whole template as one schema ("too complex"), so the fill is two calls
-# made in parallel: the data (A to C and the modality add-ons) and the deal (D to F).
-_DEAL = ("D", "E", "F")
-BriefFillData = _fill_model(
-    "BriefFillData", [s for s in SECTIONS if s.code not in _DEAL],
-    {"description": (str, Field(description="What data, in a few words"))})
-BriefFillDeal = _fill_model(
-    "BriefFillDeal", [s for s in SECTIONS if s.code in _DEAL],
-    {"notes": (str, Field("", description="Anything else that matters and fits no category")),
-     "questions": (list[str], Field(description="Things to check with the buyer"))})
-FILL_PARTS = (BriefFillData, BriefFillDeal)
+BriefFill = _fill_model("BriefFill", list(SECTIONS), {
+    "description": (str, Field(description="What data, in a few words")),
+    "notes": (str, Field("", description="Details of the data that fit no category")),
+    "questions": (list[str], Field(description="Things to check with the buyer")),
+})
+FILL_PARTS = (BriefFill,)  # one schema now; the step still accepts several parts
 
 
 def category_guide() -> str:
@@ -451,8 +471,8 @@ def from_fill(parts: list[BaseModel]) -> BriefDraft:
             continue
         pick = Pick(importance="nice" if raw.status == "inferred" else raw.status,
                     source="inferred" if raw.status == "inferred" else "stated")
-        if cat.pick == "single":
-            pick.values = [raw.value] if raw.value else []
+        if cat.pick in ("single", "paragraph"):
+            pick.values = [raw.value.strip()] if raw.value and raw.value.strip() else []
         elif cat.pick == "amount":
             pick.amount, pick.unit = raw.amount, raw.unit
         elif cat.pick == "years":
@@ -470,8 +490,7 @@ def from_fill(parts: list[BaseModel]) -> BriefDraft:
 
 _LEGACY_LICENCE = {"training_only": [COMMERCIAL, OPEN_CONDITIONS, OPEN], "commercial": [COMMERCIAL, OPEN],
                    "exclusive": [EXCLUSIVE]}
-_LEGACY_SOURCES = {"vendor": [SELLERS, COLLECTORS, MARKETPLACES], "public": [PUBLIC_BODIES, RESEARCH_INSTITUTES],
-                   "by_product": [UNTAPPED], "technology": [TECHNOLOGY]}
+_LEGACY_SOURCES = {"vendor": READY, "public": READY, "by_product": UNTAPPED, "technology": UNTAPPED}
 
 
 def from_legacy(old: dict) -> Brief:
@@ -489,8 +508,8 @@ def from_legacy(old: dict) -> Brief:
         picks["volume"] = pick([], "volume", amount=volume["amount"], unit=volume.get("unit"))
     if old.get("licence") in _LEGACY_LICENCE:
         picks["licence"] = pick(_LEGACY_LICENCE[old["licence"]], "licence")
-    sources = [s for h in old.get("holder_types", []) for s in _LEGACY_SOURCES.get(h, [])]
-    if sources and len(sources) < sum(map(len, _LEGACY_SOURCES.values())):
+    sources = list(dict.fromkeys(_LEGACY_SOURCES[h] for h in old.get("holder_types", []) if h in _LEGACY_SOURCES))
+    if len(sources) == 1:  # both = no preference
         picks["sources"] = pick(sources, "holder_types")
     details = [f"{k.replace('_', ' ')}: {', '.join(old[k])}"
                for k in ("features", "scenarios", "label_types", "formats") if old.get(k)]

@@ -1,0 +1,88 @@
+{
+  "description": "Gulf Arabic conversational audio with verbatim transcripts",
+  "picks": {
+    "modality": {
+      "values": [
+        "Audio/speech"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "domain": {
+      "values": [
+        "Meetings/conversation",
+        "Call centre/support"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "nice",
+      "source": "stated"
+    },
+    "region": {
+      "values": [
+        "Middle East (GCC)"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "nice",
+      "source": "stated"
+    },
+    "languages": {
+      "values": [
+        "Gulf Arabic"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "volume": {
+      "values": [],
+      "amount": 500.0,
+      "amount_to": null,
+      "unit": "hours",
+      "importance": "nice",
+      "source": "stated"
+    },
+    "speakers": {
+      "values": [
+        "2",
+        "3 to 5"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "nice",
+      "source": "stated"
+    },
+    "speech_style": {
+      "values": [
+        "Spontaneous conversation",
+        "Call centre"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "nice",
+      "source": "stated"
+    },
+    "transcript": {
+      "values": [
+        "Verbatim transcript",
+        "Speaker labels"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "nice",
+      "source": "stated"
+    }
+  },
+  "notes": "Natural, unscripted speech; code-switching with English is fine."
+}

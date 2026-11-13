@@ -2,23 +2,18 @@
 no search. The draft is only shown and saved for the user to edit; nothing is sent."""
 
 from worker import llm
-from worker.archetypes import BY_KEY as ARCHETYPES
-from worker.brief_template import CATEGORIES, Brief
-from worker.config import MODEL
+from worker.brief_template import CATEGORIES, OPEN, OPEN_CONDITIONS, RESTRICTED, Brief
 from worker.schemas import Candidate, Contact, EmailDraft
 
-# What to ask for depends on what kind of holder the company is
-ASKS = {
-    "seller": "whether the data is available, how much there is, its format, the price, and "
-              "whether they can share a sample",
-    "collector": "whether they could record data to this specification (languages, speakers, volume), "
-                 "how long it would take, how they price it per unit, and who would own the result",
-    "untapped": "whether they would consider licensing data they already hold, and on what terms",
-    "public": "the licence terms for using the data to train commercial models",
-    "technology": "whether they hold recordings of their own (e.g. R&D or test data) that they "
-                  "would consider licensing",
-}
+# What to ask for depends on the holder type and, for a ready source, the licence research found
+ASK_SELLER = ("whether the data is available, how much there is, its format, the price, and whether they "
+              "can share a sample")
+ASK_OPEN = "the licence terms for using the data to train commercial models"
+ASK_COLLECTOR = ("whether they could record data to this specification (languages, speakers, volume), how "
+                 "long it would take, how they price it per unit, and who would own the result")
+ASK_UNTAPPED = "whether they would consider licensing data they already hold, and on what terms"
 DEFAULT_ASK = "whether they hold this kind of data and would consider licensing it"
+
 
 PROMPT = """Write a short first outreach email from Atom, a data acquisition company, to
 {recipient} at {company} ({website}).
@@ -55,11 +50,14 @@ def _facts(c: Candidate) -> str:
             lines.append(f"- Volume: {r.volume_estimate}")
             lines += [f'- "{e.quote}" ({e.url})' for e in r.volume_evidence]
         lines += [f"- {CATEGORIES[ch.category].label}: {ch.finding}" for ch in r.checks if ch.verdict != "unclear"]
+    if s := c.current_saleability():
+        lines += [f"- {a.reason}" for q in ("exists", "allowed", "willing") if (a := getattr(s, q)).verified and a.reason]
+    lines += [f"- {t.summary} ({t.date})" for t in c.triggers]
     return "\n".join(lines) or "- Nothing beyond its name and website."
 
 
-# Deal terms the email may ask about: every E category except the budget, which is never stated
-EMAIL_TERMS = [k for k, c in CATEGORIES.items() if "E" in c.used_for and k != "budget"]
+# What the email may ask about: every E category (the prompt keeps any budget in them unsaid)
+EMAIL_TERMS = [k for k, c in CATEGORIES.items() if "E" in c.used_for]
 
 
 def _terms(brief: Brief) -> str:
@@ -68,16 +66,21 @@ def _terms(brief: Brief) -> str:
 
 
 def _ask(c: Candidate) -> str:
-    """Untapped holders may not see their data as an asset: lead with the pitch for why they hold
-    it. Ones already open to licensing get a direct question about terms."""
-    ask = ASKS.get(c.holder_type, DEFAULT_ASK)
+    if c.holder_type == "ready":
+        if c.collector:
+            return ASK_COLLECTOR
+        published = c.research and c.research.licence in (OPEN, OPEN_CONDITIONS, RESTRICTED)
+        return ASK_OPEN if published else ASK_SELLER
     if c.holder_type != "untapped":
-        return ask
-    if c.selling_status == "open_to_it":
-        ask = "on what terms they would license data they hold (they appear open to it)"
-    elif c.archetype:
-        ask += f". Open with this angle, in your own words: {ARCHETYPES[c.archetype].pitch}"
-    if c.data_owner == "customers":
+        return DEFAULT_ASK
+    s = c.current_saleability()
+    if s and (s.willing.score or 0) >= 4:  # e.g. selling assets, or done AI data deals before
+        ask = "on what terms they would license data they hold"
+    else:
+        ask = ASK_UNTAPPED + ". They may not think of it as something to sell, so say briefly why it has value"
+    if s and s.path:
+        ask += f". A possible way forward, if it fits: {s.path}"
+    elif c.data_owner == "customers":
         ask += ". Their customers own the data, so mention licensing with their customers' consent"
     return ask
 
@@ -94,5 +97,5 @@ def build_prompt(brief: Brief, c: Candidate, contact: Contact | None) -> str:
 
 
 def draft_email(brief: Brief, c: Candidate, contact: Contact | None) -> EmailDraft:
-    draft = llm.ask(build_prompt(brief, c, contact), EmailDraft, model=MODEL)
+    draft = llm.ask(build_prompt(brief, c, contact), EmailDraft, **llm.step("email"))
     return draft.model_copy(update={"to": contact.email if contact else None})

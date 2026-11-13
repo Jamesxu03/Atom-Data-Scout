@@ -1,145 +1,134 @@
 # Atom Data Scout
 
-Internal tool: given a buyer's data brief, find companies likely to hold that data, rank them
-by fit, check the promising ones in depth and draft outreach emails.
+Atom Data Scout finds companies that hold the data a buyer is looking for. Paste a buyer's brief
+(for example "1,000 hours of multi-speaker English meeting audio with transcripts") and it
+searches the web for likely holders, ranks them by fit, checks the best ones against their own
+pages, and drafts an outreach email for each.
 
-It tells apart three kinds of company:
+It is a local Streamlit app powered by Gemini with Google Search grounding. Everything it stores
+stays on your machine, and it never sends an email for you.
 
-| Type | What it means |
-|---|---|
-| **Seller** | Already holds the data and sells or licenses it (catalogues, marketplace listings). Shown as *Seller + collects* if it also records to order. |
-| **Collector** | Records or annotates data to a client's spec as a service. Judged on capacity, not stock. |
-| **Untapped holder** | Holds the data because of what it does, but doesn't sell it. Each is labelled with one of ten reasons why (`worker/archetypes.py`): service by-product, kept by law, production leftovers, labelled by its own workflow, dormant archive, device fleet, assessment and teaching, monitoring, research leftovers, community and events. It also gets a selling status (*open to selling*, *not selling* or *unclear*). |
+## What it does
 
-Public bodies and repositories, and technology companies, are typed too.
+- **Understands the brief.** Gemini turns free text into a structured brief (data type, languages,
+  regions, volume, licence, deal terms). You review it in a form and mark the must-haves.
+- **Searches widely.** It looks beyond the obvious sellers: marketplaces and open corpora, but
+  also companies that hold the data as a by-product, closed or distressed firms, customers of
+  recording tools, tenders and public records, and local markets searched in their own language.
+- **Separates two kinds of company.** *Ready sources* already sell or license the data.
+  *Untapped holders* have it but do not sell it, so they are graded on saleability: does the data
+  still exist, is selling it allowed, and is the holder willing.
+- **Ranks by fit.** Each company gets a 1 to 5 fit score from data match, coverage, licence or
+  saleability, and volume. A contradicted must-have caps the score.
+- **Verifies its claims.** Every quote must appear on the page it cites, or it is dropped. The
+  top candidates get a verdict: Confirmed, Possible, Unconfirmed or Rejected.
+- **Researches and compares.** Deep research covers licence, volume, price and contacts. A
+  Compare tab puts up to four companies side by side and re-scores them as you edit the brief.
+- **Supports outreach.** It drafts an email tailored to each company and contact, then tracks
+  each client's outreach on a drag and drop board (To contact, Emailed, Replied, and so on).
 
-## Workflow
-
-```
-Initial brief → Refine (form with options) → Final brief
-  → Search: hypotheses → discovery (9 channels) → source checks → screen → one list ranked by fit
-  → You tick promising rows → Research selected: licence evidence, volume, contacts
-  → Draft an outreach email per company
-```
-
-1. **Brief.** Paste the buyer's text and click *Refine brief*. Gemini fills in the brief
-   template (`worker/brief_template.py`): the data (A), where and who (B), volume and delivery (C),
-   rights and compliance (D), where to look (E), commercial (F), plus add-ons for the modality
-   picked (audio, video/image, text, tabular). Choices are enums, so the model can only pick
-   valid ones. Each category has an importance: **Must have** (the fit is capped when evidence
-   contradicts it), **Nice to have** (weighted into the score) or **Any** (ignored). Picks the
-   model inferred rather than read are marked *inferred* and are never Must have. Open questions
-   for the buyer sit above the form, and transfer rules (e.g. Saudi PDPL, China export) show
-   when the origin and processing location call for them. Edit anything, then click
-   *Save and search*.
-2. **Search.** Runs in the background. Each company's homepage (and the page it was found on)
-   is screened for holder type, data owner, how well the data matches (1 to 5), evidence for the
-   brief's languages and regions, signs of scale, and any must-have it clearly contradicts.
-   It also reads any price, founding year and data period the pages state, kept only when the
-   quote is on the page and contains the value's numbers (*Price*, *Data years* and *Founded*
-   columns; *?* when not published).
-   Only the channels for the source types picked (E1) run; must-have filters (E1, D6) drop
-   companies of other types, and exclusions (E2) are skipped. The channels are:
-   - product search and software directories
-   - marketplaces and collection services (sellers and collectors)
-   - open corpora and public bodies
-   - distressed, closed or for-sale companies
-   - three channels for untapped holders: what their own pages give away (privacy policies,
-     data-safety labels, job ads), the customer lists of the tools they run on, and public
-     records (tenders, finished research projects, registers)
-
-   Hypotheses use the ten archetypes as a checklist, so searches go beyond the obvious
-   by-product holders.
-3. **Ranking.** Fit is a weighted mean of four 1-to-5 scores (see `worker/scoring.py`):
-   data match 40%, coverage (languages and regions) 25%, licence 20%, volume 15%. Unknown scores
-   are left out and the weights rescaled; categories set to Any count for nothing. Fit is capped
-   at 2.0 when the evidence contradicts a must-have (the *Must-haves not met* column says which),
-   at 3.0 for technology companies, and at 2.0 when research finds the data is for internal use
-   only. Before research, the licence score is a prior based on holder type and D6:
-   - seller and collector: 4
-   - untapped holder: 3, or 2 if its customers own the data or it keeps the data by law, and
-     +1 if open to selling
-
-   Collectors are capped when C4 is a must-have without custom collection. The table filters
-   by minimum fit, type, why untapped holders have the data, languages (evidence for at least
-   one picked) and minimum volume score; companies with unknown volume stay unless *Known
-   volume* is on.
-4. **Research.** Tick rows in the table and click *Research selected*. For each company this
-   deep-crawls the homepage, privacy policy and terms, then makes one Gemini + Google Search call
-   for what data it holds, how much, its licence (in the same labels as D1, plus *Internal use
-   only*), its price, founding year and data period, and a check of each research (V)
-   requirement: quality evidence, demographics, recency,
-   permitted use, personal data, documents, processing location. What it looks for depends on
-   the type:
-   - sellers: stock, sample and price
-   - collectors: capacity, turnaround, consent and who owns commissioned data
-   - untapped holders: retention, policy, consent, and the selling status, plus whether data
-     kept for another purpose may be reused for AI training
-
-   One more call finds contacts.
-   Every quote must appear on the page it cites, or it is dropped (and a licence or check left
-   with no quote becomes *Unclear*). The licence and volume scores are then replaced and the list is ranked
-   again. The licence status is a screening flag from public pages, not legal advice.
-5. **Email.** In each researched company's panel, pick a contact (verified ones first) and click
-   *Draft email*. The email asks about the deal terms that matter most (D2 to D4, D7, F2 to F4)
-   and never states a price or the budget. The question depends on the type:
-   - sellers are asked about availability and price
-   - collectors about recording to spec and who owns the result
-   - untapped holders get the pitch for their archetype ("you already pay to store this"),
-     or a direct question about terms if they look open to selling Edit the subject and body (edits are saved), then download the draft. Nothing is
-   sent.
-
-Every search is a **session** saved under `data/sessions/<time>-<name>/`
-(`session.json`, `brief.json`, `hypotheses.json`, `discovery.json`). The sidebar reopens any
-past session from disk without rerunning. *New session from this brief* opens the form
-prefilled with the brief, so briefs can be reused as templates. Rerunning always creates a new
-session, so old results are never overwritten.
-
-Every Gemini call uses the model set in `worker/config.py`. Independent calls and page fetches
-run in parallel, and each step's time is saved with the session.
-
-## Layout
+## How a search runs
 
 ```
-app.py                  Streamlit UI (searches and research run in a background thread)
-worker/
-  config.py             model, thinking level, concurrency, budgets, fit weights and caps
-  brief_template.py     the brief template as data; the Brief model and Gemini fill schemas
-  archetypes.py         why untapped holders have data: ten archetypes, examples, pitches
-  llm.py                ask(): structured output, retries, optional Google Search
-  sessions.py           create, list, save and load session folders
-  pipeline.py           search() and research(); funnel and CSV exports
-  scoring.py            coverage, licence prior and checked status, fit, ranking
-  verify.py             is an email / phone / name / quote really on the page it cites?
-  discovery/            the nine search channels and snowball; dedupe by domain, skip exclusions
-  steps/                brief, hypotheses, screen, research, contacts, email
-  crawl.py              homepage / privacy / terms / contact pages (httpx, playwright fallback)
-  parallel.py           thread pool that keeps finished results if the quota runs out
-eval/
-  seed_companies.csv    known-good companies and their expected type (from past meeting-audio searches)
-  discovery_recall.py   what share of them discovery found, via which channel, their rank, and
-                        whether the screen gave them the expected type
-tests/                  pytest; Gemini is faked and network is blocked
-data/                   sessions and page cache (gitignored)
+Buyer's brief → Refine (form) → Final brief
+  → Search: hypotheses → local markets → discovery rounds → screening → trigger checks
+  → Two ranked lists (ready sources, untapped holders) → confirmation with quotes
+  → Research the rows you tick → Compare → Draft emails → Outreach board
 ```
 
-## Setup
+Searches run in the background, so the page stays usable while results fill in. Each search is
+saved as a session folder and can be reopened from its URL without running again.
 
-Requires [uv](https://docs.astral.sh/uv/) (installs Python 3.12 automatically).
+The full reference, including the scoring rules and what every step checks, is in
+[docs/how-it-works.md](docs/how-it-works.md).
+
+## Quick start
+
+You need [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 for you) and a
+[Gemini API key](https://aistudio.google.com/apikey) from a project with billing turned on.
 
 ```bash
+git clone https://github.com/Jamesxu03/Atom-Data-Scout.git
+cd Atom-Data-Scout
 uv sync                               # create .venv and install dependencies
-uv run playwright install chromium    # headless browser for JS-heavy sites
+uv run playwright install chromium    # headless browser for JavaScript heavy sites
 cp .env.example .env                  # then add your GEMINI_API_KEY
+uv run streamlit run app.py           # open the app
 ```
 
-## Use
+Your key lives only in `.env`, which is ignored by git. Never commit it.
+
+**Cost.** Every search makes real Gemini calls: at most 110 calls with Google Search, plus
+screening and confirmation. Research and email drafts add a few calls per company. The limits
+are in `worker/config.py`.
+
+## Configuration
+
+All settings are in `worker/config.py`:
+
+| Setting | What it controls |
+|---|---|
+| `MODEL`, `STEP_MODELS`, `STEP_THINKING` | The Gemini model and thinking level for each step |
+| `DISCOVERY`, `DISCOVERY_ROUNDS`, `MAX_GROUNDED_CALLS` | How many search calls each channel and round may make |
+| `CONFIRM_TOP` | How many candidates per list are confirmed |
+| `FIT_WEIGHTS` and the `*_CAP` values | How the fit score is weighted and capped |
+| `PARALLEL_*` | How many Gemini calls, page fetches and crawls run at once |
+
+## Project layout
+
+```
+app.py        Streamlit entry point: top bar, sidebar, page routing
+views/        the two pages: Search and Companies
+ui/           the brief form, results tables, Compare tab, outreach board, background jobs
+worker/       the pipeline, with no Streamlit code
+  pipeline.py     search() and research()
+  discovery/      search channels, rounds, merging results by domain
+  steps/          brief, hypotheses, screen, triggers, confirm, research, contacts, email
+  scoring.py      fit, saleability grade, caps and ranking
+  verify.py       checks that quotes, emails and names are really on the cited page
+  crawl.py        page fetching with a cache and a headless browser fallback
+  llm.py          one place to call Gemini: structured output, retries, quota handling
+  crm.py          clients, boards and outreach activity (SQLite)
+  sessions.py     saved searches on disk
+eval/         recall and quality checks against known good companies and fixed briefs
+tests/        pytest suite; Gemini is faked and the network is blocked
+data/         sessions, crm.sqlite3 and the page cache (created at run time, ignored by git)
+```
+
+## Development
 
 ```bash
-uv run streamlit run app.py           # the UI (every search makes real Gemini calls)
-uv run pytest                         # tests, no API calls
-RUN_LIVE=1 uv run pytest              # also run the live Gemini test (checks the API key)
-uv run python -m eval.discovery_recall [session_dir]   # recall and rank of eval/seed_companies.csv
+uv run pytest                 # about 235 tests, no API calls, a few seconds
+uv run ruff check .           # lint
+RUN_LIVE=1 uv run pytest      # also run the live Gemini test (uses your key)
+```
+
+Evaluation scripts measure how well discovery performs on fixed briefs:
+
+```bash
+uv run python -m eval.discovery_recall [session_dir]                 # recall of eval/seed_companies.csv
+uv run python -m eval.settings A meeting_audio_en 2                  # live: two runs under setting A
+uv run python -m eval.discovery_quality meeting_audio_en [--labels]  # report on those runs
 ```
 
 Add a dependency with `uv add <package>`.
+
+## Good to know
+
+- **Results are leads, not facts.** Licence and saleability are screening flags read from public
+  pages. They are not legal advice. Check them before you rely on them.
+- **Nothing is sent.** Email drafts are downloaded and sent from your own mailbox. The buyer is
+  never named in a draft, and no price or budget is stated.
+- **Data stays local.** Sessions, the client database and cached pages are written to `data/`.
+  Only prompts and page text go to the Gemini API.
+- **Polite crawling.** Pages are fetched once and cached for a week. Only public web addresses
+  are fetched.
+
+## Tech stack
+
+Python 3.12, Streamlit, Google Gemini (`google-genai`) with Google Search grounding, Pydantic,
+httpx, trafilatura, Playwright, SQLite, pytest and ruff.
+
+## Author
+
+Built by [James Xu](https://github.com/Jamesxu03) at Atom Group.

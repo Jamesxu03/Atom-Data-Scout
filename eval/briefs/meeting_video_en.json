@@ -1,0 +1,87 @@
+{
+  "description": "Multi-speaker English meeting video with speaker labels",
+  "picks": {
+    "modality": {
+      "values": [
+        "Video"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "domain": {
+      "values": [
+        "Meetings/conversation"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "annotation": {
+      "values": [
+        "Basic labels"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "languages": {
+      "values": [
+        "English"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "volume": {
+      "values": [],
+      "amount": 1000.0,
+      "amount_to": null,
+      "unit": "video hours",
+      "importance": "must",
+      "source": "stated"
+    },
+    "licence": {
+      "values": [
+        "Public domain / Open",
+        "Open with conditions",
+        "Commercial, non-exclusive"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "nice",
+      "source": "inferred"
+    },
+    "permitted_use": {
+      "values": [
+        "Internal model training",
+        "Training for a commercial product"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "must",
+      "source": "stated"
+    },
+    "deal_terms": {
+      "values": [
+        "Personal data: Identifiable with documented consent; People in frame: Identifiable with consent"
+      ],
+      "amount": null,
+      "amount_to": null,
+      "unit": null,
+      "importance": "nice",
+      "source": "stated"
+    }
+  },
+  "notes": "Target volume is at least 1,000 hours of multi-speaker English meeting video with speaker labels for an AI video company."
+}

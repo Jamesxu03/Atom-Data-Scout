@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from worker import crawl
@@ -118,3 +120,38 @@ def test_cache_expires_after_ttl(monkeypatch, tmp_path):
     os.utime(path, (week_ago, week_ago))
     assert crawl.fetch_html_quick("https://acme.example/privacy") == "<p>new policy</p>"
     assert not list(tmp_path.glob("*.tmp"))  # atomic writes leave no temp files behind
+
+
+def test_crawl_fetches_policy_pages_side_by_side(monkeypatch):
+    home = ('<a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/contact">Contact</a>'
+            + FULL)
+    all_fetching = threading.Barrier(3, timeout=5)  # privacy, terms and contact at once
+
+    def fetch(url):
+        if url == "https://acme.com":
+            return home
+        all_fetching.wait()
+        return FULL
+
+    monkeypatch.setattr(crawl, "_fetch_httpx", fetch)
+    result = crawl.crawl("acme.com")
+    assert result.errors == []
+    assert [p.url for p in result.pages()] == ["https://acme.com", "https://acme.com/privacy",
+                                               "https://acme.com/terms", "https://acme.com/contact"]
+
+
+@pytest.mark.parametrize("url", [
+    "https://otter.ai/privacy", "http://example.co.uk", "https://8.8.8.8/page",
+])
+def test_check_public_allows_public_web_addresses(url):
+    crawl.check_public(url)
+
+
+@pytest.mark.parametrize("url", [
+    "file:///etc/passwd", "ftp://example.com/x", "https://", "http://localhost:8501", "http://app.localhost",
+    "http://127.0.0.1/admin", "http://10.0.0.5", "http://192.168.1.1/router", "http://169.254.169.254/latest",
+    "http://[::1]/", "http://printer.local", "http://db.internal",
+])
+def test_check_public_refuses_local_and_non_web_addresses(url):
+    with pytest.raises(ValueError):
+        crawl.check_public(url)

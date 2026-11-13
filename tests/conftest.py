@@ -15,12 +15,24 @@ def no_network(monkeypatch):
     monkeypatch.setattr(httpx, "head", blocked)
     monkeypatch.setattr("worker.crawl._recent_failures", {})
 
+    def no_browser(self, url):
+        raise RuntimeError(f"browser disabled in tests: {url}")
+
+    monkeypatch.setattr("worker.crawl.Browser.render", no_browser)
+
 
 @pytest.fixture(autouse=True)
 def tmp_sessions(monkeypatch, tmp_path):
     """Sessions are written under the test's temp folder, never data/sessions/."""
     monkeypatch.setattr("worker.sessions.SESSIONS_DIR", tmp_path / "sessions")
     return tmp_path / "sessions"
+
+
+@pytest.fixture(autouse=True)
+def tmp_crm(monkeypatch, tmp_path):
+    """Clients and outreach go to a database in the test's temp folder, never data/crm.sqlite3."""
+    monkeypatch.setattr("worker.crm.CRM_DB", tmp_path / "crm.sqlite3")
+    return tmp_path / "crm.sqlite3"
 
 
 @pytest.fixture

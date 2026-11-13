@@ -3,8 +3,6 @@ import pytest
 from tests.test_hypotheses import BRIEF, brief_with
 from worker.brief_template import (
     COMMERCIAL,
-    CUSTOMER_CONSENT,
-    CUSTOMER_LATER,
     EXCLUSIVE,
     INTERNAL_ONLY,
     OPEN,
@@ -13,9 +11,9 @@ from worker.brief_template import (
     UNCLEAR,
     Pick,
 )
-from worker.config import FIT_WEIGHTS, INTERNAL_ONLY_CAP, MUST_HAVE_CAP, TECHNOLOGY_CAP
+from worker.config import FIT_WEIGHTS, INTERNAL_ONLY_CAP, MUST_HAVE_CAP
 from worker.schemas import Candidate, Check, Evidence, Research, Scores
-from worker.scoring import coverage, fit, licence_from_found, licence_prior, must_failures, rescore
+from worker.scoring import coverage, fit, licence_from_found, licence_score, must_failures, rescore
 
 QUOTE = [Evidence(quote="q", url="u")]
 
@@ -46,8 +44,7 @@ TOP = Scores(data_match=5, coverage=5, licence=5, volume=5)
 
 
 def test_caps():
-    assert fit(_cand(scores=TOP, holder_type="technology"), BRIEF) == TECHNOLOGY_CAP
-    assert fit(_cand(scores=TOP, research=_research(INTERNAL_ONLY)), BRIEF) == INTERNAL_ONLY_CAP
+    assert fit(_cand(scores=TOP, holder_type="ready", research=_research(INTERNAL_ONLY)), BRIEF) == INTERNAL_ONLY_CAP
     must_lang = brief_with(languages=Pick(values=["English"], importance="must"))
     assert fit(_cand(scores=TOP), must_lang) == MUST_HAVE_CAP  # no language evidence
     assert fit(_cand(scores=TOP, languages=["English"]), must_lang) == 5.0
@@ -58,16 +55,25 @@ def test_must_have_contradictions():
     assert must_failures(_cand(scores=TOP, contradicts=["modality"]), BRIEF) == ["modality"]
     assert must_failures(_cand(scores=TOP, contradicts=["speakers"]), BRIEF) == []  # nice to have
     must_licence = brief_with(licence=Pick(values=[COMMERCIAL, OPEN], importance="must"))
-    assert must_failures(_cand(scores=TOP, research=_research(RESTRICTED)), must_licence) == ["licence"]
-    assert must_failures(_cand(scores=TOP, research=_research(EXCLUSIVE)), must_licence) == []
+
+    def ready(licence):
+        return _cand(scores=TOP, holder_type="ready", research=_research(licence))
+
+    assert must_failures(ready(RESTRICTED), must_licence) == ["licence"]
+    assert must_failures(ready(EXCLUSIVE), must_licence) == []
     # unclear is only a contradiction when the buyer leaves "Unclear" out of a must-have D1
-    assert must_failures(_cand(scores=TOP, research=_research(UNCLEAR)), must_licence) == ["licence"]
+    assert must_failures(ready(UNCLEAR), must_licence) == ["licence"]
     keep_unclear = brief_with(licence=Pick(values=[COMMERCIAL, UNCLEAR], importance="must"))
-    assert must_failures(_cand(scores=TOP, research=_research(UNCLEAR)), keep_unclear) == []
-    assert must_failures(_cand(scores=TOP, research=_research(UNCLEAR)), BRIEF) == []  # D1 nice to have
-    docs = brief_with(documents=Pick(values=["Per-person consent records"], importance="must"))
-    failed = Check(category="documents", verdict="fails", finding="no consent records", evidence=QUOTE)
-    assert must_failures(_cand(scores=TOP, research=_research(checks=[failed])), docs) == ["documents"]
+    assert must_failures(ready(UNCLEAR), keep_unclear) == []
+    assert must_failures(ready(UNCLEAR), BRIEF) == []  # D1 nice to have
+    # untapped holders are judged by saleability, not D1
+    untapped = _cand(scores=TOP, holder_type="untapped", research=_research(UNCLEAR))
+    assert must_failures(untapped, must_licence) == []
+    docs = brief_with(deal_terms=Pick(values=["Per-person consent records"], importance="must"))
+    failed = Check(category="deal_terms", verdict="fails", finding="no consent records", evidence=QUOTE)
+    assert must_failures(_cand(scores=TOP, research=_research(checks=[failed])), docs) == ["deal_terms"]
+    old = Check.model_validate({**failed.model_dump(), "category": "documents"})  # older template
+    assert old.category == "deal_terms"
     unclear = failed.model_copy(update={"verdict": "unclear"})
     assert must_failures(_cand(scores=TOP, research=_research(checks=[unclear])), docs) == []
     must_volume = brief_with(volume=Pick(amount=1000, unit="hours", importance="must"))
@@ -84,19 +90,13 @@ def test_coverage():
     assert coverage(brief_with(languages=None), [], []) is None
 
 
-@pytest.mark.parametrize(("holder", "owner", "score"), [
-    ("seller", "company", 4), ("public", "unclear", 3), ("untapped", "company", 3),
-    ("untapped", "customers", 2), ("technology", "company", 2), ("untapped", "unclear", None),
-    ("unrelated", "company", None), (None, None, None),
-])
-def test_licence_prior(holder, owner, score):
-    assert licence_prior(_cand(holder_type=holder, data_owner=owner), BRIEF) == score
-
-
-def test_customer_data_choice_sets_the_prior():
-    held_for_customers = _cand(holder_type="untapped", data_owner="customers")
-    assert licence_prior(held_for_customers, brief_with(customer_data=Pick(values=[CUSTOMER_CONSENT]))) == 2
-    assert licence_prior(held_for_customers, brief_with(customer_data=Pick(values=[CUSTOMER_LATER]))) is None
+def test_ready_sources_start_at_4_until_research_checks_the_licence():
+    c = _cand(holder_type="ready", data_owner="company")
+    assert licence_score(c, BRIEF) == 4
+    assert licence_score(c.model_copy(update={"research": _research(RESTRICTED)}), BRIEF) == 1
+    assert licence_score(c.model_copy(update={"research": _research(UNCLEAR)}), BRIEF) == 4  # nothing found
+    assert licence_score(c, brief_with(licence=None)) is None
+    assert licence_score(_cand(), BRIEF) is None  # unscreened
 
 
 @pytest.mark.parametrize(("found", "score"), [
@@ -108,15 +108,14 @@ def test_licence_found_against_what_the_buyer_accepts(found, score):
 
 
 def test_research_replaces_priors_unless_it_found_nothing():
-    c = _cand(holder_type="untapped", data_owner="customers", languages=["English"],
-              scores=Scores(data_match=5, volume=3))
+    c = _cand(holder_type="ready", data_owner="company", languages=["English"], scores=Scores(data_match=5, volume=3))
     rescore(c, BRIEF)
-    assert (c.scores.licence, c.scores.volume) == (2, 3)
+    assert (c.scores.licence, c.scores.volume) == (4, 3)
     c.research = _research(COMMERCIAL, volume_score=5)
     rescore(c, BRIEF)
     assert (c.scores.licence, c.scores.volume, c.fit) == (5, 5, 5.0)
     c.research = _research(UNCLEAR)
     rescore(c, BRIEF)
-    assert c.scores.licence == 2  # back to the prior, not dropped
-    rescore(c, brief_with(licence=Pick(values=[COMMERCIAL], importance="any")))
-    assert c.scores.licence is None  # licence set to Any: ignored
+    assert c.scores.licence == 4  # back to the prior, not dropped
+    rescore(c, brief_with(licence=None))
+    assert c.scores.licence is None  # licence left empty: ignored

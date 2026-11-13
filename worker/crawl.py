@@ -8,11 +8,13 @@ Never raises for a bad site — failures are recorded in CrawlResult.errors.
 """
 
 import hashlib
+import ipaddress
 import os
 import re
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -89,12 +91,42 @@ _url_locks_guard = threading.Lock()
 _recent_failures: dict[str, tuple[float, Exception]] = {}
 
 
+# trafilatura parses with one module-level lxml parser, which isn't thread-safe: extracting in
+# several threads at once corrupts libxml2's memory and aborts the whole process (no traceback).
+# Extraction is quick next to the downloads, so it takes turns; fetching stays parallel.
+_extract_lock = threading.Lock()
+
+
+def extract_text(html: str, **options) -> str:
+    """trafilatura.extract, one call at a time. "" when there's no main text."""
+    with _extract_lock:
+        return trafilatura.extract(html, **options) or ""
+
+
 def _lock_for(url: str) -> threading.Lock:
     with _url_locks_guard:
         return _url_locks.setdefault(url, threading.Lock())
 
 
+def check_public(url: str) -> None:
+    """Raise ValueError unless url is http(s) to a public host. URLs come from search results and
+    Gemini, so one pointing at this machine or the local network is never fetched."""
+    parts = urlparse(url)
+    host = (parts.hostname or "").lower()
+    if parts.scheme not in ("http", "https") or not host:
+        raise ValueError(f"not a web address: {url}")
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        raise ValueError(f"local address: {url}")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return  # a domain name
+    if not ip.is_global:
+        raise ValueError(f"private address: {url}")
+
+
 def _fetch_httpx(url: str) -> str:
+    check_public(url)
     with httpx.Client(follow_redirects=True, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT}) as c:
         r = c.get(url)
         r.raise_for_status()
@@ -104,13 +136,19 @@ def _fetch_httpx(url: str) -> str:
 class Browser:
     """One headless Chromium, started on first use and shared by every page of a crawl.
 
-    Playwright's sync API is per-thread: create and use a Browser inside a single thread.
+    Playwright's sync API is per-thread, so all browser work runs on one thread of its own:
+    any thread may call render, and renders take turns.
     """
 
     def __init__(self):
         self._pw = self._browser = None
+        self._thread = ThreadPoolExecutor(1, thread_name_prefix="browser")
 
     def render(self, url: str) -> str:
+        return self._thread.submit(self._render, url).result()
+
+    def _render(self, url: str) -> str:
+        check_public(url)
         if self._browser is None:
             from playwright.sync_api import sync_playwright
 
@@ -129,6 +167,11 @@ class Browser:
 
     def close(self) -> None:
         if self._browser is not None:
+            self._thread.submit(self._close).result()
+        self._thread.shutdown()
+
+    def _close(self) -> None:
+        if self._browser is not None:
             self._browser.close()
             self._pw.stop()
             self._pw = self._browser = None
@@ -141,7 +184,7 @@ class Browser:
 
 
 def _has_text(html: str) -> bool:
-    return len(trafilatura.extract(html) or "") >= MIN_TEXT_CHARS
+    return len(extract_text(html)) >= MIN_TEXT_CHARS
 
 
 def fetch_html_quick(url: str) -> str:
@@ -195,13 +238,25 @@ def fetch_html(url: str, browser: Browser | None = None) -> str:
     return html
 
 
+def fetch_rendered(url: str, browser: Browser) -> str:
+    """Browser-rendered HTML for url, cached with the deep crawl's renders. Raises on failure."""
+    if not url.startswith("http"):
+        url = "https://" + url
+    path = _cache_path(url, rendered=True)
+    if (html := _read_cache(path)) is not None:
+        return html
+    html = browser.render(url)
+    _write_cache(path, html)
+    return html
+
+
 def fetch_homepage_text(website: str) -> str:
     """Cheap homepage fetch for screening: httpx only (no browser), cached. Raises on failure.
 
     Falls back to <title> + meta description when there's no main text (JS-heavy sites).
     """
     html = fetch_html_quick(website)
-    text = trafilatura.extract(html) or ""
+    text = extract_text(html)
     if len(text) < MIN_TEXT_CHARS:
         title = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
         desc = re.search(
@@ -237,7 +292,7 @@ def _find_link(html: str, base_url: str, kind: str) -> str | None:
 
 def _page(url: str, browser: Browser) -> Page:
     html = fetch_html(url, browser)
-    text = trafilatura.extract(html, include_links=False) or ""
+    text = extract_text(html, include_links=False)
     if not text:
         raise ValueError("no main text extracted")
     return Page(url=url, text=text)
@@ -256,13 +311,17 @@ def crawl(website: str) -> CrawlResult:
             result.errors.append(f"homepage: {type(e).__name__}: {e}")
             return result
 
+        links = {}
         for kind in ("privacy", "terms", "contact"):
-            link = _find_link(home_html, website, kind)
-            if not link:
+            if link := _find_link(home_html, website, kind):
+                links[kind] = link
+            else:
                 result.errors.append(f"{kind}: no link found on homepage")
-                continue
+        with ThreadPoolExecutor(3) as pool:  # fetched side by side; renders take turns in the browser
+            futures = {kind: pool.submit(_page, link, browser) for kind, link in links.items()}
+        for kind, future in futures.items():
             try:
-                setattr(result, kind, _page(link, browser))
+                setattr(result, kind, future.result())
             except Exception as e:
                 result.errors.append(f"{kind}: {type(e).__name__}: {e}")
     return result

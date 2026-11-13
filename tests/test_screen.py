@@ -2,11 +2,17 @@ import httpx
 import pytest
 
 from tests.test_hypotheses import BRIEF, brief_with
-from worker.brief_template import CUSTOMER_EXCLUDE, SELLERS, Pick
-from worker.config import MUST_HAVE_CAP, SCREEN_BATCH_SIZE, TECHNOLOGY_CAP
-from worker.schemas import Candidate
+from worker.brief_template import CUSTOMER_EXCLUDE, READY, Pick
+from worker.config import (
+    MUST_HAVE_CAP,
+    NOT_SELLABLE_CAP,
+    SCREEN_BATCH_SIZE,
+    THIN_PAGE_TEXT_CHARS,
+    TRIGGER_CAP,
+)
+from worker.schemas import Candidate, Confirmation, SellingSignal
 from worker.scoring import is_relevant, rank
-from worker.steps.screen import ScreenBatch, ScreenItem, Stated, screen, source_excerpt
+from worker.steps.screen import NO_HOMEPAGE, ScreenBatch, ScreenItem, Stated, screen, source_excerpt
 
 
 def _cand(domain):
@@ -16,8 +22,9 @@ def _cand(domain):
 
 def _score_by_prefix(prompt):
     """good-* -> data_match 5, mid-* -> 3, else 1 and unrelated; skips 'silent-*' to test missing
-    answers. Evidence for English unless the domain has 'nolang'; 'tech' in the domain makes it
-    a technology company."""
+    answers. Evidence for English unless the domain has 'nolang'. Untapped holders answer
+    exists 4, allowed 4, willing 3 (grade 3), except 'tech' ones: a tool maker that doesn't keep
+    the data (exists 1)."""
     items = []
     for line in prompt.splitlines():
         if line.startswith("### "):
@@ -25,10 +32,11 @@ def _score_by_prefix(prompt):
             if domain.startswith("silent"):
                 continue
             match = {"good": 5, "mid": 3}.get(domain.split("-")[0], 1)
-            holder = "technology" if "tech" in domain else "unrelated" if match == 1 else "untapped"
+            holder = "unrelated" if match == 1 else "untapped"
             items.append(ScreenItem(domain=domain.upper(), holder_type=holder, data_owner="company",
                                     data_match=match, languages=[] if "nolang" in domain else ["english"],
-                                    regions=[], volume_signal=None, reason=f"because {domain}"))
+                                    regions=[], volume_signal=None, reason=f"because {domain}",
+                                    exists=1 if "tech" in domain else 4, allowed=4, willing=3))
     return ScreenBatch(results=items)
 
 
@@ -53,7 +61,7 @@ def test_screen_scores_and_excludes(fake_ask):
     assert good.fit == round((0.4 * 5 + 0.25 * 5 + 0.2 * 3) / 0.85, 2)
     assert by["no-c.com"].excluded
     assert by["down.com"].fit is None and not by["down.com"].excluded  # unreachable is kept, not judged
-    assert "unreachable" in by["down.com"].reason
+    assert by["down.com"].reason.startswith("not screened: homepage couldn't be read")
     assert by["silent-d.com"].screened and by["silent-d.com"].fit is None  # model skipped it
     assert [c.domain for c in rank(cands)][:2] == ["good-a.com", "mid-b.com"]
     assert [c.domain for c in cands if is_relevant(c)] == ["good-a.com", "mid-b.com"]
@@ -128,26 +136,35 @@ def test_only_unscreened_candidates_are_screened(fake_ask):
     assert done.reason == "screened earlier" and new.scores.data_match == 5
 
 
-def test_rank_by_fit_then_corroboration():
-    def scored(domain, fit, channels=("product_search",), excluded=False):
+def test_rank_by_verdict_then_fit_then_selling_signals():
+    def scored(domain, fit, channels=("product_search",), excluded=False, verdict=None, signals=0):
         c = _cand(domain)
         c.reason, c.fit, c.channels, c.excluded = "r", fit, list(channels), excluded
+        if verdict:
+            c.confirmation = Confirmation(verdict=verdict, reason="r", signals=[
+                SellingSignal(kind="own_data", summary="s", evidence=[]) for _ in range(signals)])
         return c
 
     famous = scored("famous.com", 3.5, ["product_search", "directory", "snowball"])
-    niche = scored("niche.com", 3.5)
+    niche = scored("niche.com", 3.5, verdict="unconfirmed", signals=1)
     vendor = scored("vendor.com", 4.6, ["marketplace"])
     unknown = scored("unknown.com", None, ["product_search", "directory", "snowball", "marketplace"])
     dropped = scored("dropped.com", 4.9, excluded=True)
-    order = [c.domain for c in rank([unknown, niche, dropped, famous, vendor])]
-    assert order == ["vendor.com", "famous.com", "niche.com", "unknown.com", "dropped.com"]
+    confirmed = scored("confirmed.com", 3.0, verdict="confirmed")
+    possible = scored("possible.com", 2.8, verdict="possible")
+    rejected = scored("rejected.com", 4.8, verdict="rejected")
+    order = [c.domain for c in rank([unknown, niche, dropped, famous, vendor, confirmed, possible, rejected])]
+    # corroboration no longer breaks the tie: niche's verified selling signal does
+    assert order == ["confirmed.com", "possible.com", "vendor.com", "niche.com", "famous.com", "unknown.com",
+                     "rejected.com", "dropped.com"]
 
 
-def test_technology_company_is_capped(fake_ask):
+def test_tool_maker_without_the_data_is_not_sellable(fake_ask):
     fake_ask.responses[ScreenBatch] = _score_by_prefix
-    tech = _cand("good-tech.com")  # model says a perfect match, but it sells software, not recordings
+    tech = _cand("good-tech.com")  # pages are all about the data type, but it doesn't keep any
     screen(BRIEF, [tech], fetch=lambda _: "text", progress=lambda _: None)
-    assert tech.holder_type == "technology" and tech.fit == TECHNOLOGY_CAP
+    assert tech.holder_type == "untapped" and tech.saleability.exists.score == 1
+    assert tech.scores.licence == 1 and tech.fit == NOT_SELLABLE_CAP
 
 
 def test_no_evidence_for_a_must_have_language_caps_fit(fake_ask):
@@ -171,7 +188,7 @@ def test_no_language_evidence_without_must_have_only_lowers_coverage(fake_ask):
 def test_only_the_briefs_languages_and_regions_count(fake_ask):
     def answer(prompt):
         return ScreenBatch(results=[
-            ScreenItem(domain="tilde.ee", holder_type="seller", data_owner="company", data_match=5,
+            ScreenItem(domain="tilde.ee", holder_type="ready", data_owner="company", data_match=5,
                        languages=[" latvian", "French"], regions=["baltics "], volume_signal=4,
                        reason="Baltic speech data"),
             ScreenItem(domain="global.com", holder_type="untapped", data_owner="customers", data_match=5,
@@ -193,27 +210,24 @@ def test_coverage_unknown_when_brief_names_no_languages_or_regions(fake_ask):
     c = _cand("good-nolang.com")
     screen(brief_with(languages=None), [c], fetch=lambda _: "text", progress=lambda _: None)
     assert c.scores.coverage is None
-    d = _cand("good-nolang2.com")  # a language set to Any counts for nothing
-    screen(brief_with(languages=Pick(values=["English"], importance="any")), [d], fetch=lambda _: "text",
-           progress=lambda _: None)
-    assert d.scores.coverage is None
 
 
-def test_vendor_working_on_customers_data_is_by_product(fake_ask):
+def test_ready_source_working_on_customers_data_is_untapped(fake_ask):
     def answer(prompt):
         return ScreenBatch(results=[
-            ScreenItem(domain="agency.lt", holder_type="seller", data_owner="customers", data_match=4,
-                       languages=["English"], regions=[], volume_signal=None,
+            ScreenItem(domain="agency.lt", holder_type="ready", data_owner="customers", data_match=4,
+                       languages=["English"], regions=[], volume_signal=None, exists=4, allowed=4, willing=4,
                        reason="interpreting and transcription agency"),
-            ScreenItem(domain="data.com", holder_type="seller", data_owner="company", data_match=5,
+            ScreenItem(domain="data.com", holder_type="ready", data_owner="company", data_match=5,
                        languages=["English"], regions=[], volume_signal=None, reason="sells meeting datasets"),
         ])
 
     fake_ask.responses[ScreenBatch] = answer
     agency, seller = _cand("agency.lt"), _cand("data.com")
     screen(BRIEF, [agency, seller], fetch=lambda _: "text", progress=lambda _: None)
+    # its customers own the data: "allowed" is at most 2, so the grade is low
     assert (agency.holder_type, agency.data_owner, agency.scores.licence) == ("untapped", "customers", 2)
-    assert (seller.holder_type, seller.scores.licence) == ("seller", 4)
+    assert (seller.holder_type, seller.saleability, seller.scores.licence) == ("ready", None, 4)
 
 
 def test_screen_sends_homepage_and_source_page(fake_ask):
@@ -289,7 +303,7 @@ def test_only_must_have_contradictions_cap(fake_ask):
 
 def test_must_have_filters_exclude(fake_ask):
     fake_ask.responses[ScreenBatch] = _answer()
-    vendors_only = brief_with(sources=Pick(values=[SELLERS], importance="must"))
+    vendors_only = brief_with(sources=Pick(values=[READY], importance="must"))
     c = _cand("acme.com")
     screen(vendors_only, [c], fetch=lambda _: "text", progress=lambda _: None)
     assert c.excluded and "not a source type the buyer accepts" in c.reason
@@ -299,16 +313,16 @@ def test_must_have_filters_exclude(fake_ask):
     screen(no_customer_data, [c], fetch=lambda _: "text", progress=lambda _: None)
     assert c.excluded and "customers' data" in c.reason
 
-    nice = brief_with(sources=Pick(values=[SELLERS]), customer_data=Pick(values=[CUSTOMER_EXCLUDE]))
+    nice = brief_with(sources=Pick(values=[READY]), customer_data=Pick(values=[CUSTOMER_EXCLUDE]))
     c = _cand("acme.com")
     screen(nice, [c], fetch=lambda _: "text", progress=lambda _: None)
-    assert not c.excluded and c.scores.licence == 1  # nice to have: scored down, not dropped
+    assert not c.excluded and c.scores.licence == 1  # nice to have: "allowed" is 1, not dropped
 
 
-def test_volume_set_to_any_is_ignored(fake_ask):
+def test_volume_left_empty_is_ignored(fake_ask):
     fake_ask.responses[ScreenBatch] = _answer(volume_signal=1)
     c = _cand("acme.com")
-    screen(brief_with(volume=Pick(amount=1000, unit="hours", importance="any")), [c], fetch=lambda _: "text",
+    screen(brief_with(volume=None), [c], fetch=lambda _: "text",
            progress=lambda _: None)
     assert c.scores.volume is None
 
@@ -333,3 +347,70 @@ def test_price_and_age_kept_only_with_a_quote_on_the_page(fake_ask):
     c = _cand("acme.com")
     screen(BRIEF, [c], fetch=lambda _: home, progress=lambda _: None, source=lambda _: src)
     assert (c.data_period.value, c.data_period.url) == ("2018 to 2024", "https://listings.example/acme")
+
+
+def test_short_fact_quotes_are_kept_when_they_contain_the_numbers(fake_ask):
+    fake_ask.responses[ScreenBatch] = _answer(founded={"value": "2016", "quote": "Founded in 2016."},
+                                              price={"value": "£500", "quote": "We record calls."})
+    c = _cand("acme.com")
+    screen(BRIEF, [c], fetch=lambda _: "Founded in 2016. We record calls.", progress=lambda _: None,
+           source=lambda _: None)
+    assert c.founded and c.founded.value == "2016"  # 3 words, but the quote contains the year
+    assert c.price is None  # the quote doesn't contain the price
+
+
+def test_blocked_homepage_is_judged_from_the_page_it_was_found_on(fake_ask):
+    fake_ask.responses[ScreenBatch] = _score_by_prefix
+    blocked, lost = _cand("good-blocked.com"), _cand("good-lost.com")
+
+    def fetch(url):
+        request = httpx.Request("GET", url)
+        raise httpx.HTTPStatusError("403", request=request, response=httpx.Response(403, request=request))
+
+    def source(c):
+        return "Source page on another site (https://news.example/a), passage mentioning it:\nx" if c is blocked else None
+
+    screen(BRIEF, [blocked, lost], fetch=fetch, progress=lambda _: None, source=source)
+    assert blocked.fit is not None
+    assert blocked.reason.endswith("(homepage blocks automated access (HTTP 403): judged from the page it was found on)")
+    assert (lost.fit, lost.excluded) == (None, False)
+    assert lost.reason == ("not screened: homepage blocks automated access (HTTP 403), "
+                           "and no other page about it was found")
+    (call,) = fake_ask.calls
+    assert NO_HOMEPAGE in call.prompt and "good-lost.com" not in call.prompt
+
+
+def test_big_or_regulated_is_flagged_not_scored_unwilling_and_names_its_archetype(fake_ask):
+    def answer(prompt):
+        return ScreenBatch(results=[ScreenItem(
+            domain="bank.com", holder_type="untapped", data_owner="company", data_match=4, languages=["English"],
+            regions=[], volume_signal=None, reason="retail bank", exists=5, allowed=None, willing=None,
+            needs_trigger=True, archetype="kept_by_law")])
+
+    fake_ask.responses[ScreenBatch] = answer
+    bank = _cand("bank.com")
+    screen(BRIEF, [bank], fetch=lambda _: "We record calls " * 50, progress=lambda _: None, source=lambda _: None)
+    assert (bank.needs_trigger, bank.archetype, bank.fit) == (True, "kept_by_law", TRIGGER_CAP)
+    prompt = fake_ask.calls[0].prompt
+    assert "Being a big brand or\n  regulated is not a reason for 1: set needs_trigger instead." in prompt
+    assert "recordings kept for financial regulation" not in prompt
+    assert "- kept_by_law: Kept by law" in prompt and "copy\nquotes in the page's own language" in prompt
+
+
+def test_thin_homepages_are_rendered_and_sent_with_more_room(fake_ask):
+    fake_ask.responses[ScreenBatch] = _score_by_prefix
+    thin, full = _cand("good-thin.com"), _cand("good-full.com")
+    pages = {"https://good-thin.com": "Loading...", "https://good-full.com": "Full homepage text. " * 100}
+    rendered = []
+
+    def render(url):
+        rendered.append(url)
+        return "Rendered text of a JavaScript site. " * 150
+
+    screen(BRIEF, [thin, full], fetch=pages.__getitem__, progress=lambda _: None, source=lambda _: None,
+           render=render)
+    assert rendered == ["https://good-thin.com"]  # the full page needs no browser
+    (call,) = fake_ask.calls
+    thin_part = call.prompt.split("### good-thin.com")[1].split("###")[0]
+    assert thin_part.count("Rendered text") > THIN_PAGE_TEXT_CHARS // 40  # more room than a normal page
+    assert "Loading..." not in thin_part
